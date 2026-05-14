@@ -15,7 +15,7 @@ import tkinter as tk
 import configparser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import oxco_workers as ow
 import oxco_i18n as oi
@@ -32,6 +32,57 @@ def app_dir() -> Path:
 
 def config_path() -> Path:
     return app_dir() / CONFIG_NAME
+
+
+def default_davinci_api_path() -> str:
+    """Blackmagic-Standard: Ordner mit DaVinciResolveScript (Studio)."""
+    if sys.platform == "win32":
+        pd = os.environ.get("ProgramData", r"C:\ProgramData")
+        return str(
+            Path(pd)
+            / "Blackmagic Design"
+            / "DaVinci Resolve"
+            / "Support"
+            / "Developer"
+            / "Scripting"
+            / "Modules"
+        )
+    if sys.platform == "darwin":
+        return (
+            "/Library/Application Support/Blackmagic Design/"
+            "DaVinci Resolve/Developer/Scripting/Modules"
+        )
+    return ""
+
+
+def default_davinci_exe_path() -> str:
+    """Optionaler Auto-Start: Resolve-Binary (Windows/macOS)."""
+    if sys.platform == "win32":
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        preferred = Path(pf) / "Blackmagic Design" / "DaVinci Resolve" / "Resolve.exe"
+        if preferred.is_file():
+            return str(preferred)
+        bmd = Path(pf) / "Blackmagic Design"
+        if bmd.is_dir():
+            hits = sorted(
+                bmd.glob("DaVinci Resolve*/Resolve.exe"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if hits:
+                return str(hits[0])
+        return str(preferred)
+    if sys.platform == "darwin":
+        for p in (
+            Path("/Applications/DaVinci Resolve.app/Contents/MacOS/Resolve"),
+            Path(
+                "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve"
+            ),
+        ):
+            if p.is_file():
+                return str(p)
+        return "/Applications/DaVinci Resolve.app/Contents/MacOS/Resolve"
+    return ""
 
 
 def load_config() -> Dict[str, Any]:
@@ -70,8 +121,10 @@ class OxcoApp:
         self._compare_proc: Optional[Any] = None
         self._compare_user_stopped = False
         self._bitrate_rows: List[ow.VideoRow] = []
+        self._bitrate_scan_folder: Optional[Path] = None
         self._bitrate_stop = threading.Event()
         self._bitrate_thread: Optional[threading.Thread] = None
+        self._tagger_scan_paths: List[Path] = []
         self._pipe_canvas: Optional[tk.Canvas] = None
         self._pipe_win_id: Optional[int] = None
         self._video_preview: Optional[OxcoVideoPreview] = None
@@ -113,17 +166,15 @@ class OxcoApp:
         if _ui not in ("de", "en"):
             _ui = "de"
         self.var_ui_lang = tk.StringVar(value=_ui)
-        self._default_davinci_api = ""
-        self._default_davinci_exe = ""
-        self.var_davinci_api = tk.StringVar(
-            value=str(self._cfg.get("davinci_api_path", self._default_davinci_api))
-        )
+        self._default_davinci_api = default_davinci_api_path()
+        self._default_davinci_exe = default_davinci_exe_path()
+        _api_saved = str(self._cfg.get("davinci_api_path", "")).strip()
+        _exe_saved = str(self._cfg.get("davinci_exe_path", "")).strip()
+        self.var_davinci_api = tk.StringVar(value=_api_saved or self._default_davinci_api)
         self.var_davinci_preset = tk.StringVar(
             value=str(self._cfg.get("davinci_render_preset", "AutoCutPreset"))
         )
-        self.var_davinci_exe = tk.StringVar(
-            value=str(self._cfg.get("davinci_exe_path", self._default_davinci_exe))
-        )
+        self.var_davinci_exe = tk.StringVar(value=_exe_saved or self._default_davinci_exe)
         _dsw = self._cfg.get("davinci_startup_wait_seconds", "20")
         self.var_davinci_startup_wait = tk.StringVar(value=str(_dsw).strip() or "20")
         self._sync_davinci_from_ini_if_needed()
@@ -170,6 +221,8 @@ class OxcoApp:
         self.root.minsize(720, 560)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Configure>", self._on_configure)
+
+        self.root.after(150, lambda: self._tagger_refresh_list(log_count=True))
 
         self.root.update_idletasks()
         geom = str(self._cfg.get("window_geometry", "")).strip()
@@ -289,6 +342,7 @@ class OxcoApp:
         if getattr(self, "_suppress_path_sync", False):
             return
         self._path_refresh_tagger_follows_bitrate()
+        self.root.after(150, lambda: self._tagger_refresh_list(log_count=False))
 
     def tr(self, key: str, **kwargs: Any) -> str:
         return oi.tr(self.var_ui_lang.get(), key, **kwargs)
@@ -352,6 +406,8 @@ class OxcoApp:
         self.tree.heading("src_k", text=self.tr("flow.tree.src_k"))
         self.tree.heading("ziel_k", text=self.tr("flow.tree.tgt_k"))
         self.tree.heading("aktion", text=self.tr("flow.tree.action"))
+        if getattr(self, "tree_tagger", None) is not None:
+            self.tree_tagger.heading("tf", text=self.tr("flow.tagger_tree_file"))
 
     def _open_settings(self) -> None:
         if self._settings_win is not None and self._settings_win.winfo_exists():
@@ -751,6 +807,7 @@ class OxcoApp:
         tsb = ttk.Scrollbar(tree_fr, orient="vertical", command=self.tree.yview)
         tsb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=tsb.set)
+        self.tree.bind("<Button-3>", self._bitrate_tree_context_menu)
 
         bf = ttk.Frame(b)
         bf.grid(row=1, column=0, sticky="ew", pady=4)
@@ -780,6 +837,31 @@ class OxcoApp:
         ttk.Entry(t, textvariable=self.var_tag_profile).grid(row=tr, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(t, text="(i)", width=3, command=self._help_profile_name).grid(row=tr, column=2, padx=4, pady=4)
         tr += 1
+        tgf = ttk.Frame(t)
+        tgf.grid(row=tr, column=0, columnspan=3, sticky="ew", padx=4, pady=(4, 0))
+        tgf.columnconfigure(0, weight=1)
+        self.btn_tagger_refresh = ttk.Button(
+            tgf, text=self.tr("flow.tagger_refresh"), command=lambda: self._tagger_refresh_list(log_count=True)
+        )
+        self.btn_tagger_refresh.pack(side="right", padx=(8, 6), pady=2)
+        tr += 1
+        tag_tree_fr = ttk.Frame(t)
+        tag_tree_fr.grid(row=tr, column=0, columnspan=3, sticky="nsew", padx=4, pady=4)
+        tag_tree_fr.columnconfigure(0, weight=1)
+        tag_tree_fr.rowconfigure(0, weight=1)
+        t.rowconfigure(tr, weight=1)
+        self.tree_tagger = ttk.Treeview(tag_tree_fr, columns=("tf",), show="headings", height=6, selectmode="extended")
+        self.tree_tagger.column("tf", width=520, minwidth=120)
+        self.tree_tagger.grid(row=0, column=0, sticky="nsew")
+        ttsb = ttk.Scrollbar(tag_tree_fr, orient="vertical", command=self.tree_tagger.yview)
+        ttsb.grid(row=0, column=1, sticky="ns")
+        self.tree_tagger.configure(yscrollcommand=ttsb.set)
+        self.tree_tagger.heading("tf", text=self.tr("flow.tagger_tree_file"))
+        tr += 1
+        hint_tg = ttk.Label(t, text=self.tr("flow.tagger_hint"), foreground="gray", wraplength=640)
+        hint_tg.grid(row=tr, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        self._i18n_labeled.append((hint_tg, "flow.tagger_hint"))
+        tr += 1
         self.btn_tagger = ttk.Button(t, text=self.tr("flow.process"), command=self._run_tagger)
         self.btn_tagger.grid(row=tr, column=0, columnspan=3, padx=6, pady=8, sticky="w")
 
@@ -791,6 +873,7 @@ class OxcoApp:
             (self.btn_scan, "flow.scan"),
             (self.btn_conv, "flow.convert"),
             (self.btn_stop_br, "flow.stop"),
+            (self.btn_tagger_refresh, "flow.tagger_refresh"),
             (self.btn_tagger, "flow.process"),
         )
         inner.after(1, self._sync_pipe_canvas)
@@ -1261,6 +1344,7 @@ class OxcoApp:
     def _bitrate_scan_done(self, rows: List[ow.VideoRow], folder: Path) -> None:
         self.btn_scan.configure(state="normal")
         self._bitrate_rows = rows
+        self._bitrate_scan_folder = folder
         self.tree.delete(*self.tree.get_children())
         for i, row in enumerate(rows):
             rel = str(row.path.relative_to(folder)) if row.path.is_relative_to(folder) else str(row.path)
@@ -1280,6 +1364,109 @@ class OxcoApp:
             )
         n_c = sum(1 for r in rows if r.action == "convert")
         self._log(self.tr("log.scan_done", n=len(rows), c=n_c))
+
+    def _bitrate_rebuild_tree_from_rows(self) -> None:
+        folder = self._bitrate_scan_folder or Path(self.var_bitrate_in.get().strip())
+        self.tree.delete(*self.tree.get_children())
+        for i, row in enumerate(self._bitrate_rows):
+            rel = str(row.path.relative_to(folder)) if row.path.is_relative_to(folder) else str(row.path)
+            self.tree.insert(
+                "",
+                tk.END,
+                iid=str(i),
+                values=(
+                    rel,
+                    f"{row.width}x{row.height}",
+                    row.source_kbps if row.source_kbps is not None else "-",
+                    row.effective_target_kbps if row.effective_target_kbps is not None else "-",
+                    self.tr("br.action.convert")
+                    if row.action == "convert"
+                    else self.tr("br.action.skip"),
+                ),
+            )
+
+    def _bitrate_tree_context_menu(self, event: tk.Event) -> None:
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        sel = self.tree.selection()
+        if not sel or row_id not in sel:
+            self.tree.selection_set(row_id)
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=self.tr("flow.ctx_move_to_tagger"), command=self._bitrate_move_selection_to_tagger_in)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _bitrate_move_selection_to_tagger_in(self) -> None:
+        tag_in = Path(self.var_tagger_in.get().strip())
+        if not tag_in.is_dir():
+            messagebox.showerror(self.tr("err.input"), self.tr("err.tagger_in_for_move"))
+            return
+        br_in = Path(self.var_bitrate_in.get().strip())
+        if not self._bitrate_rows:
+            return
+        sel = self.tree.selection()
+        if not sel:
+            return
+        if tag_in.resolve() == br_in.resolve():
+            messagebox.showinfo(self.tr("info.note"), self.tr("info.tagger_same_as_bitrate_in"))
+            return
+        indices = sorted({int(iid) for iid in sel if str(iid).isdigit()})
+        to_move: List[Path] = []
+        for i in indices:
+            if 0 <= i < len(self._bitrate_rows):
+                to_move.append(self._bitrate_rows[i].path)
+        if not to_move:
+            return
+        moved_res: Set[Any] = set()
+        for src in to_move:
+            if not src.is_file():
+                continue
+            dst = tag_in / src.name
+            if dst.resolve() == src.resolve():
+                continue
+            if dst.exists():
+                dst = ow.make_unique_path(dst)
+            try:
+                shutil.move(str(src), str(dst))
+            except OSError as e:
+                messagebox.showerror(self.tr("err.input"), str(e))
+                break
+            moved_res.add(src.resolve())
+            self._log(self.tr("log.br_move_tagger", name=dst.name))
+        self._bitrate_rows = [r for r in self._bitrate_rows if r.path.resolve() not in moved_res]
+        self._bitrate_rebuild_tree_from_rows()
+        self._tagger_refresh_list(log_count=False)
+
+    def _tagger_refresh_list(self, *, log_count: bool = True) -> None:
+        if getattr(self, "tree_tagger", None) is None:
+            return
+        self.tree_tagger.delete(*self.tree_tagger.get_children())
+        self._tagger_scan_paths.clear()
+        inp = Path(self.var_tagger_in.get().strip())
+        if not inp.is_dir():
+            return
+        files = sorted(p for p in inp.glob("*.mp4") if not ow._is_partial_temp_video(p.name))
+        self._tagger_scan_paths.extend(files)
+        for i, p in enumerate(files):
+            self.tree_tagger.insert("", tk.END, iid=str(i), values=(p.name,))
+        if log_count and files:
+            self._log(self.tr("log.tagger_list", n=len(files)))
+
+    def _tagger_resolved_only_files(self) -> Optional[List[Path]]:
+        if getattr(self, "tree_tagger", None) is None:
+            return None
+        sel = self.tree_tagger.selection()
+        if not sel:
+            return None
+        indices = sorted({int(iid) for iid in sel if str(iid).isdigit()})
+        out: List[Path] = []
+        for i in indices:
+            if 0 <= i < len(self._tagger_scan_paths):
+                out.append(self._tagger_scan_paths[i])
+        return out
 
     def _bitrate_stop_click(self) -> None:
         self._bitrate_stop.set()
@@ -1366,6 +1553,7 @@ class OxcoApp:
         self.btn_conv.configure(state="normal")
         self.btn_stop_br.configure(state="disabled")
         self._log(self.tr("log.br_done"))
+        self._tagger_refresh_list(log_count=False)
         self._save()
 
     def _run_tagger(self) -> None:
@@ -1374,10 +1562,18 @@ class OxcoApp:
         if not inp.is_dir() or not outp.as_posix():
             messagebox.showerror(self.tr("err.input"), self.tr("err.tagger_folders"))
             return
+        only = self._tagger_resolved_only_files()
+        if only is not None and len(only) == 0:
+            messagebox.showerror(self.tr("err.input"), self.tr("err.tagger_sel_invalid"))
+            return
         outp.mkdir(parents=True, exist_ok=True)
 
         def log(s: str) -> None:
             self.root.after(0, lambda m=s: self._log(m))
+
+        lang = (self.var_ui_lang.get().strip() or "de").lower()
+        if lang not in ("de", "en"):
+            lang = "de"
 
         def work() -> None:
             ok, sk = ow.tagger_process_folder(
@@ -1390,14 +1586,19 @@ class OxcoApp:
                 drop_suffix_csv=self.var_drop.get(),
                 pattern_text=self.var_pattern.get(),
                 log=log,
+                only_files=only,
+                ui_lang=lang,
             )
             self.root.after(0, lambda: self._tagger_done(ok, sk))
 
         threading.Thread(target=work, daemon=True).start()
         self._log(self.tr("log.tagger_start"))
+        if only:
+            self._log(self.tr("log.tagger_sel", n=len(only)))
 
     def _tagger_done(self, ok: int, skipped: int) -> None:
         self._log(self.tr("log.tagger_done", ok=ok, sk=skipped))
+        self._tagger_refresh_list(log_count=False)
         self._save()
 
 

@@ -46,6 +46,10 @@ DE: Dict[str, str] = {
     "flow.tag": "Tag im Dateinamen",
     "flow.profile": "Profilname (Fallback)",
     "flow.process": "Jetzt verarbeiten",
+    "flow.tagger_tree_file": "Datei (.mp4)",
+    "flow.tagger_refresh": "Liste laden",
+    "flow.tagger_hint": "Keine Markierung: alle Dateien im Quellordner. Mit Markierung: nur die gewählten Zeilen.",
+    "flow.ctx_move_to_tagger": "In Autotagger-Quellordner verschieben",
     "filters.group_compare": "Compare — Analyse und Export",
     "filters.lang_note": "Sprache für Compare und diese Oberfläche: Einstellungen (⚙).",
     "filters.buffer": "Puffer (Sekunden)",
@@ -98,6 +102,7 @@ DE: Dict[str, str] = {
     "info.compare_busy": "Ein Vergleich läuft schon — bitte warten.",
     "info.convert_busy": "Eine Konvertierung läuft schon — bitte warten.",
     "info.note": "Hinweis",
+    "info.tagger_same_as_bitrate_in": "Autotagger-Quelle und Bitrate-Eingang sind derselbe Ordner — Verschieben entfällt.",
     "err.input": "Eingabe",
     "err.tool": "Werkzeug fehlt",
     "err.ffprobe": "ffprobe wurde nicht gefunden (PATH).",
@@ -114,6 +119,8 @@ DE: Dict[str, str] = {
     "err.br_sel_no_convert": "Unter den markierten Zeilen ist keine zum Konvertieren vorgesehen (Spalte „konvertieren“).",
     "err.br_none_to_convert": "Im Scan ist keine Datei zum Konvertieren vorgesehen (Regeln / Spalte Aktion).",
     "err.tagger_folders": "Tagger: Quell- und Zielordner setzen (Tab Pfade).",
+    "err.tagger_sel_invalid": "Ungültige Markierung in der Autotagger-Tabelle — „Liste laden“ klicken und Zeilen wählen.",
+    "err.tagger_in_for_move": "Autotagger-Quellordner setzen (Tab Pfade), damit Dateien dorthin verschoben werden können.",
     "err.br_rule": "Regel für ≥{h} px fehlt.",
     "err.br_rule_num": "Ungültige Zahl bei ≥{h}: {raw}",
     "err.br_rule_pos": "Wert muss > 0 sein (≥{h}).",
@@ -135,6 +142,10 @@ DE: Dict[str, str] = {
     "log.br_src_delete_fail": "Quelle konnte nicht gelöscht werden: {name} ({err})",
     "log.tagger_start": "— Autotagger gestartet —",
     "log.tagger_done": "— Autotagger fertig: {ok} verschoben, {sk} übersprungen —",
+    "log.tagger_list": "Autotagger-Liste: {n} .mp4 im Quellordner.",
+    "log.tagger_sel": "Autotagger: nur {n} markierte Datei(en).",
+    "log.br_move_tagger": "Nach Autotagger-Quelle verschoben: {name}",
+    "log.tagger_no_sel_match": "Keine der markierten Dateien liegt (mehr) im Quellordner — „Liste laden“.",
     "help.thresholds.title": "Schwellen",
     "help.thresholds.body": (
         "Puffer (Sekunden): Kurz warten, ob ein Unterschied wirklich weg ist — damit der Schnitt "
@@ -159,12 +170,13 @@ DE: Dict[str, str] = {
     ),
     "help.bitrate.title": "Bitrate",
     "help.bitrate.body": (
-        "Je nach Bildhöhe des Videos nimmt Oxco die passende Zeile in der Tabelle.\n\n"
+        "Je nach der kürzeren Bildkante (Minimum aus Breite und Höhe) nimmt Oxco die passende Zeile in der Tabelle. "
+        "Hochkant zählt damit wie die gleiche Stufe im Querformat (z. B. 1080×1920 wie 1080p, nicht wie 1920 Pixel Höhe).\n\n"
         "Die neue Datei wird nicht stärker komprimiert als die Quelle es hergibt.\n\n"
         "„Nur wenn Ziel unter Quelle“: Dateien, die schon klein genug sind, werden übersprungen.\n\n"
         "Konvertieren: Ohne Markierung in der Tabelle werden alle Zeilen mit Aktion „konvertieren“ verarbeitet. "
         "Mit Strg- oder Umschalt-Klick mehrere Zeilen markieren — dann nur diese.\n\n"
-        "Optional: Häkchen „Original löschen“ entfernt die Quelldatei nur nach **erfolgreicher** Umwandlung "
+        "Optional: Häkchen „Original löschen“ entfernt die Quelldatei nur nach erfolgreicher Umwandlung "
         "(Quell- und Ausgabedatei dürfen nicht derselbe Pfad sein)."
     ),
     "help.suffix.title": "Suffix",
@@ -174,7 +186,14 @@ DE: Dict[str, str] = {
     "help.ignore.title": "Ignore-Suffixe",
     "help.ignore.body": "Dateien mit solchem Namensende werden nicht bearbeitet — z. B. wenn du Rohmaterial auslassen willst.",
     "help.drop.title": "Drop-Suffixe",
-    "help.drop.body": "Endungen, die beim Umbenennen weg sollen. Meist leer lassen.",
+    "help.drop.body": (
+        "Teile am Ende des Dateinamens (ohne .mp4), die beim Umbenennen abgeschnitten werden — per Komma wie bei Keep.\n\n"
+        "Nur was du einträgst (oder per Regex trifft), wird entfernt. Steht im Namen z. B. eine andere Auflösung als in der Liste, "
+        "bleibt sie unverändert — außer du fasst sie mit ab.\n\n"
+        "Regex: Eintrag mit r: am Anfang, danach ein Python-kompatibles Muster; es gilt nur am Namensende "
+        "(Groß/Klein egal). Beispiel für gängige Pixelhöhen: r:_\\d{3,4}p trifft u. a. auf _1080p, _720p, _2160p zu.\n\n"
+        "Komma trennt nur Einträge — ein Komma im Regex vermeiden (z. B. Alternativen mit (?:a|b) nutzen)."
+    ),
     "help.pattern.title": "Muster im Dateinamen",
     "help.pattern.body": (
         "Ein Stück Text im Dateinamen, das Oxco findet — oft ein Datum oder eine Zeit (z. B. YYMMDDHHmmSS).\n"
@@ -294,6 +313,10 @@ EN.update(
         "flow.tag": "Tag in filename",
         "flow.profile": "Profile name (fallback)",
         "flow.process": "Process now",
+        "flow.tagger_tree_file": "File (.mp4)",
+        "flow.tagger_refresh": "Load list",
+        "flow.tagger_hint": "No selection: every .mp4 in the source folder. With selection: only the highlighted rows.",
+        "flow.ctx_move_to_tagger": "Move to autotagger source folder",
         "filters.group_compare": "Compare — analysis and export",
         "filters.lang_note": "Language for Compare and this UI: Settings (⚙).",
         "filters.buffer": "Buffer (seconds)",
@@ -346,6 +369,7 @@ EN.update(
         "info.compare_busy": "A compare run is already in progress — please wait.",
         "info.convert_busy": "A conversion is already in progress — please wait.",
         "info.note": "Note",
+        "info.tagger_same_as_bitrate_in": "Autotagger source and bitrate input are the same folder — nothing to move.",
         "err.input": "Input",
         "err.tool": "Missing tool",
         "err.ffprobe": "ffprobe was not found (PATH).",
@@ -362,6 +386,8 @@ EN.update(
         "err.br_sel_no_convert": "None of the selected rows are set to convert (check the Action column).",
         "err.br_none_to_convert": "No files in the scan are set to convert (rules / Action column).",
         "err.tagger_folders": "Tagger: set source and destination folders (Paths tab).",
+        "err.tagger_sel_invalid": "Invalid selection in the autotagger table — click “Load list” and pick rows.",
+        "err.tagger_in_for_move": "Set the autotagger source folder (Paths tab) before moving files there.",
         "err.br_rule": "Rule for ≥{h} px is missing.",
         "err.br_rule_num": "Invalid number at ≥{h}: {raw}",
         "err.br_rule_pos": "Value must be > 0 (≥{h}).",
@@ -383,6 +409,10 @@ EN.update(
         "log.br_src_delete_fail": "Could not delete source: {name} ({err})",
         "log.tagger_start": "— Autotagger started —",
         "log.tagger_done": "— Autotagger finished: {ok} moved, {sk} skipped —",
+        "log.tagger_list": "Autotagger list: {n} .mp4 in the source folder.",
+        "log.tagger_sel": "Autotagger: only {n} selected file(s).",
+        "log.br_move_tagger": "Moved to autotagger source: {name}",
+        "log.tagger_no_sel_match": "None of the selected files are in the source folder anymore — click “Load list”.",
         "help.thresholds.title": "Thresholds",
         "help.thresholds.body": (
             "Buffer (seconds): short wait to see if a difference really disappeared — so cuts do not flicker.\n\n"
@@ -404,12 +434,13 @@ EN.update(
         ),
         "help.bitrate.title": "Bitrate",
         "help.bitrate.body": (
-            "Depending on video height, Oxco picks the matching table row.\n\n"
+            "Oxco picks the table row from the shorter frame side (min of width and height), so portrait clips use "
+            "the same tier as the equivalent landscape size (e.g. 1080×1920 is treated like 1080p, not like a 1920-tall row).\n\n"
             "The new file is never compressed more aggressively than the source allows.\n\n"
             "“Only if target below source”: files that are already small enough are skipped.\n\n"
             "Convert: With no rows selected in the table, every row with action “convert” runs. "
             "Ctrl- or Shift-click to select multiple rows — only those are processed.\n\n"
-            "Optional: “Delete original” removes the source file only after a **successful** conversion "
+            "Optional: “Delete original” removes the source file only after a successful conversion "
             "(source and output paths must not be the same file)."
         ),
         "help.suffix.title": "Suffix",
@@ -419,7 +450,14 @@ EN.update(
         "help.ignore.title": "Ignore suffixes",
         "help.ignore.body": "Files whose names end like this are skipped — e.g. to exclude raw material.",
         "help.drop.title": "Drop suffixes",
-        "help.drop.body": "Endings to strip when renaming. Often leave empty.",
+        "help.drop.body": (
+            "Trailing parts of the filename stem (before .mp4) to strip when renaming — comma-separated like Keep.\n\n"
+            "Only what you list (or what your regex matches at the end) is removed. If the file ends with a different tag "
+            "than any literal you listed, it stays — unless you cover it with a pattern.\n\n"
+            "Regex: start an entry with r: followed by a Python regex; it only matches at the end of the stem "
+            "(case-insensitive). Example for common heights: r:_\\d{3,4}p matches _1080p, _720p, _2160p, etc.\n\n"
+            "Commas split entries only — avoid a raw comma inside the regex (use alternation like (?:a|b))."
+        ),
         "help.pattern.title": "Filename pattern",
         "help.pattern.body": (
             "Text in the filename Oxco should find — often a date or time (e.g. YYMMDDHHmmSS).\n"

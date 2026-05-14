@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import oxco_i18n as oi
 
@@ -159,9 +159,15 @@ def run_ffprobe(path: Path) -> Tuple[Optional[int], Optional[int], Optional[int]
     return width, height, kbps
 
 
-def pick_rule_for_height(height: int, rules: Dict[int, int]) -> int:
+def pick_rule_for_short_side(width: int, height: int, rules: Dict[int, int]) -> int:
+    """Wählt die Bitrate-Zeile nach der kürzeren Kantenlänge.
+
+    Hochkant (z. B. 1080×1920) soll dieselbe Stufe wie Quer-1080p nutzen, nicht die Zeile der
+    längeren Kante (1920 → fälschlich 1440p/4K).
+    """
+    short_side = min(int(width), int(height))
     for threshold in sorted(rules.keys(), reverse=True):
-        if height >= threshold:
+        if short_side >= threshold:
             return rules[threshold]
     return rules[min(rules.keys())]
 
@@ -225,7 +231,7 @@ def analyze_single_file(file_path: Path, rules: Dict[int, int], only_lower: bool
             action="skip",
             reason="Auflösung nicht lesbar",
         )
-    rule = pick_rule_for_height(height, rules)
+    rule = pick_rule_for_short_side(width, height, rules)
     if source_kbps is None:
         return VideoRow(
             path=file_path,
@@ -599,6 +605,33 @@ def parse_suffix_list(raw_text: str) -> List[str]:
     return values
 
 
+# Drop-Suffixe: wie Keep per Komma; zusätzlich ``r:…`` = Regex nur am **Ende** des Namens (Flags re.I).
+DropStripEntry = Union[str, re.Pattern]
+
+
+def parse_drop_suffix_entries(raw_text: str) -> List[DropStripEntry]:
+    """Literale wie ``parse_suffix_list`` oder ``r:regex`` (muss das Namensende treffen, ``\\Z`` wird angehängt)."""
+    out: List[DropStripEntry] = []
+    for part in raw_text.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        if len(p) >= 2 and p[:2].lower() == "r:":
+            expr = p[2:].lstrip()
+            if not expr:
+                continue
+            try:
+                out.append(re.compile(expr + r"\Z", re.IGNORECASE))
+            except re.error:
+                continue
+            continue
+        value = p
+        if not value.startswith("_"):
+            value = f"_{value}"
+        out.append(value.lower())
+    return out
+
+
 def extract_pattern_match(original_stem: str, pattern_text: str) -> str:
     pattern_text = (pattern_text or "YYMMDDHHmmSS").strip()
     pattern_text = pattern_text.replace("{", "").replace("}", "")
@@ -629,15 +662,21 @@ def extract_pattern_match(original_stem: str, pattern_text: str) -> str:
 def pick_suffix_to_keep(original_stem: str, keep_csv: str, drop_csv: str) -> str:
     stem_lower = original_stem.lower()
     keep_list = parse_suffix_list(keep_csv)
-    drop_list = parse_suffix_list(drop_csv)
+    drop_entries = parse_drop_suffix_entries(drop_csv)
+    drop_literals = [e for e in drop_entries if isinstance(e, str)]
     for suffix in keep_list:
         if stem_lower.endswith(suffix):
-            if suffix in drop_list:
+            if suffix in drop_literals:
                 return ""
             return original_stem[-len(suffix) :]
-    for suffix in drop_list:
-        if stem_lower.endswith(suffix):
-            return ""
+    for entry in drop_entries:
+        if isinstance(entry, str):
+            if stem_lower.endswith(entry):
+                return ""
+        else:
+            m = entry.search(original_stem)
+            if m and m.end() == len(original_stem):
+                return ""
     return ""
 
 
@@ -662,17 +701,26 @@ def remove_date_token(original_stem: str, pattern_text: str) -> str:
 
 
 def remove_trailing_suffixes(stem: str, keep_csv: str, drop_csv: str) -> str:
-    all_suffixes = parse_suffix_list(keep_csv) + parse_suffix_list(drop_csv)
+    keep_list = parse_suffix_list(keep_csv)
+    drop_entries = parse_drop_suffix_entries(drop_csv)
+    all_entries: List[DropStripEntry] = list(keep_list) + list(drop_entries)
     current = stem
     changed = True
     while changed and current:
         changed = False
         lower_current = current.lower()
-        for suffix in all_suffixes:
-            if lower_current.endswith(suffix):
-                current = current[: -len(suffix)].rstrip("_- ")
-                changed = True
-                break
+        for entry in all_entries:
+            if isinstance(entry, str):
+                if lower_current.endswith(entry):
+                    current = current[: -len(entry)].rstrip("_- ")
+                    changed = True
+                    break
+            else:
+                m = entry.search(current)
+                if m and m.end() == len(current):
+                    current = current[: m.start()].rstrip("_- ")
+                    changed = True
+                    break
     return current
 
 
@@ -734,10 +782,23 @@ def tagger_process_folder(
     drop_suffix_csv: str,
     pattern_text: str,
     log: Callable[[str], None],
+    only_files: Optional[Sequence[Path]] = None,
+    ui_lang: str = "de",
 ) -> Tuple[int, int]:
-    """Verarbeitet alle .mp4 im Ordner (nicht rekursiv). Rückgabe: (ok, übersprungen)."""
+    """Process ``.mp4`` in the folder (non-recursive). If ``only_files`` is set, only those paths (must be under input_dir).
+
+    Returns (moved_ok, skipped).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    files = sorted(p for p in input_dir.glob("*.mp4") if not _is_partial_temp_video(p.name))
+    all_files = sorted(p for p in input_dir.glob("*.mp4") if not _is_partial_temp_video(p.name))
+    if only_files:
+        want = {p.resolve() for p in only_files}
+        files = [p for p in all_files if p.resolve() in want]
+        if not files:
+            log(oi.tr(ui_lang, "log.tagger_no_sel_match"))
+            return 0, 0
+    else:
+        files = all_files
     ok = 0
     skipped = 0
     for fp in files:
