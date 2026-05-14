@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.spec.bak
+*.egg-info/
+.eggs/
+
+# Local secrets and machine state (created at runtime)
+settings.ini
+oxco_compare_export_checkpoint.json
+autocut_cache.txt
+
+# PyInstaller / local releases
+*.zip
+Oxco.spec
