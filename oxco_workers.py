@@ -830,6 +830,85 @@ def tagger_process_folder(
     return ok, skipped
 
 
+def normalize_tag_route_rules(raw: object) -> List[Tuple[str, str]]:
+    """``[{"tag": "...", "folder": "..."}, ...]`` → Liste (tag, folder), leere Einträge weg."""
+    out: List[Tuple[str, str]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag", "")).strip()
+        folder = str(item.get("folder", "")).strip()
+        if tag and folder:
+            out.append((tag, folder))
+    return out
+
+
+def pick_tag_route_for_filename(filename: str, rules: Sequence[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
+    """Erste Regel, deren Tag als Teilstring im Dateinamen vorkommt (case-insensitive)."""
+    name_fold = filename.casefold()
+    for tag, folder in rules:
+        if tag.casefold() in name_fold:
+            return tag, folder
+    return None
+
+
+def tagger_distribute_by_rules(
+    source_dir: Path,
+    rules: Sequence[Tuple[str, str]],
+    log: Callable[[str], None],
+    ui_lang: str = "de",
+) -> Tuple[int, int, int]:
+    """Verschiebt ``.mp4`` aus ``source_dir`` nach Zielordnern je Regel (erster Treffer gewinnt).
+
+    Returns (moved, no_match, errors).
+    """
+    norm: List[Tuple[str, str]] = []
+    for item in rules:
+        if isinstance(item, dict):
+            tag = str(item.get("tag", "")).strip()
+            folder = str(item.get("folder", "")).strip()
+        else:
+            tag = str(item[0]).strip()
+            folder = str(item[1]).strip()
+        if tag and folder:
+            norm.append((tag, folder))
+    if not norm:
+        log(oi.tr(ui_lang, "log.tag_route_no_rules"))
+        return 0, 0, 0
+    if not source_dir.is_dir():
+        log(oi.tr(ui_lang, "err.tag_route_out_missing"))
+        return 0, 0, 0
+
+    files = sorted(p for p in source_dir.glob("*.mp4") if not _is_partial_temp_video(p.name))
+    moved = 0
+    no_match = 0
+    errors = 0
+    for fp in files:
+        hit = pick_tag_route_for_filename(fp.name, norm)
+        if not hit:
+            log(oi.tr(ui_lang, "log.tag_route_no_match", name=fp.name))
+            no_match += 1
+            continue
+        _tag, dest_dir_s = hit
+        dest_dir = Path(dest_dir_s)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            target = make_unique_path(dest_dir / fp.name)
+            if not wait_until_file_stable(fp):
+                log(oi.tr(ui_lang, "log.tag_route_unstable", name=fp.name))
+                errors += 1
+                continue
+            shutil.move(str(fp), str(target))
+            log(oi.tr(ui_lang, "log.tag_route_moved", name=fp.name, dest=str(target.parent)))
+            moved += 1
+        except OSError as e:
+            log(oi.tr(ui_lang, "log.tag_route_error", name=fp.name, err=e))
+            errors += 1
+    return moved, no_match, errors
+
+
 def convert_video_rows(
     rows: List[VideoRow],
     input_root: Path,

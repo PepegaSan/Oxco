@@ -50,6 +50,31 @@ DE: Dict[str, str] = {
     "flow.tagger_refresh": "Liste laden",
     "flow.tagger_hint": "Keine Markierung: alle Dateien im Quellordner. Mit Markierung: nur die gewählten Zeilen.",
     "flow.ctx_move_to_tagger": "In Autotagger-Quellordner verschieben",
+    "flow.tag_route_setup": "Tag-Verteilung…",
+    "flow.tag_route_distribute": "Verteilen",
+    "flow.tag_route_auto": "Nach Taggen automatisch verteilen",
+    "flow.tag_route_title": "Tag-Verteilung",
+    "flow.tag_route_col_tag": "Tag im Dateinamen",
+    "flow.tag_route_col_folder": "Zielordner",
+    "flow.tag_route_add": "Zeile hinzufügen",
+    "flow.tag_route_save": "Speichern & schließen",
+    "flow.tag_route_remove": "Entfernen",
+    "err.tag_route_no_rules": "Keine Tag-Verteilungsregeln — zuerst „Tag-Verteilung…“ einrichten.",
+    "err.tag_route_out_missing": "Autotagger-Zielordner ungültig (Tab Pfade).",
+    "log.tag_route_start": "— Tag-Verteilung gestartet —",
+    "log.tag_route_done": "— Tag-Verteilung fertig: {moved} verschoben, {nomatch} ohne Treffer, {err} Fehler —",
+    "log.tag_route_moved": "Verteilt: {name} → {dest}",
+    "log.tag_route_no_match": "Kein passender Tag: {name}",
+    "log.tag_route_no_rules": "Tag-Verteilung: keine gültigen Regeln.",
+    "log.tag_route_unstable": "Übersprungen (Datei noch nicht fertig): {name}",
+    "log.tag_route_error": "Fehler bei {name}: {err}",
+    "help.tag_route.title": "Tag-Verteilung",
+    "help.tag_route.body": (
+        "Quelle ist immer der Autotagger-Zielordner (Tab Pfade). Pro Zeile: Tag-Text und Zielordner.\n\n"
+        "Enthält der Dateiname den Tag als Text (Groß/Klein egal), wird die Datei dorthin verschoben. "
+        "Mehrere Regeln: die erste passende Zeile von oben gewinnt.\n\n"
+        "Ohne Treffer bleibt die Datei im Zielordner des Autotaggers."
+    ),
     "filters.group_compare": "Compare — Analyse und Export",
     "filters.lang_note": "Sprache für Compare und diese Oberfläche: Einstellungen (⚙).",
     "filters.buffer": "Puffer (Sekunden)",
@@ -317,6 +342,31 @@ EN.update(
         "flow.tagger_refresh": "Load list",
         "flow.tagger_hint": "No selection: every .mp4 in the source folder. With selection: only the highlighted rows.",
         "flow.ctx_move_to_tagger": "Move to autotagger source folder",
+        "flow.tag_route_setup": "Tag routing…",
+        "flow.tag_route_distribute": "Distribute",
+        "flow.tag_route_auto": "Distribute automatically after tagging",
+        "flow.tag_route_title": "Tag routing",
+        "flow.tag_route_col_tag": "Tag in filename",
+        "flow.tag_route_col_folder": "Destination folder",
+        "flow.tag_route_add": "Add row",
+        "flow.tag_route_save": "Save & close",
+        "flow.tag_route_remove": "Remove",
+        "err.tag_route_no_rules": "No tag routing rules — open “Tag routing…” first.",
+        "err.tag_route_out_missing": "Invalid autotagger destination folder (Paths tab).",
+        "log.tag_route_start": "— Tag routing started —",
+        "log.tag_route_done": "— Tag routing finished: {moved} moved, {nomatch} no match, {err} errors —",
+        "log.tag_route_moved": "Routed: {name} → {dest}",
+        "log.tag_route_no_match": "No matching tag: {name}",
+        "log.tag_route_no_rules": "Tag routing: no valid rules.",
+        "log.tag_route_unstable": "Skipped (file not ready): {name}",
+        "log.tag_route_error": "Error for {name}: {err}",
+        "help.tag_route.title": "Tag routing",
+        "help.tag_route.body": (
+            "Source is always the autotagger destination folder (Paths tab). Each row: tag text and destination folder.\n\n"
+            "If the filename contains the tag (case-insensitive), the file is moved there. "
+            "With multiple rules, the first matching row from the top wins.\n\n"
+            "Files with no match stay in the autotagger destination folder."
+        ),
         "filters.group_compare": "Compare — analysis and export",
         "filters.lang_note": "Language for Compare and this UI: Settings (⚙).",
         "filters.buffer": "Buffer (seconds)",

@@ -130,6 +130,9 @@ class OxcoApp:
         self._video_preview: Optional[OxcoVideoPreview] = None
         self._notebook: Optional[ttk.Notebook] = None
         self._settings_win: Optional[tk.Toplevel] = None
+        self._tag_route_win: Optional[tk.Toplevel] = None
+        self._tag_route_row_vars: List[tuple[tk.StringVar, tk.StringVar]] = []
+        self._tag_route_busy = False
 
         # —— Variablen: Pfade ——
         # Compare-Export → Bitrate-Scan (wenn gekoppelt, siehe trace).
@@ -214,6 +217,10 @@ class OxcoApp:
         self.var_ignore = tk.StringVar(value=str(self._cfg.get("tagger_ignore", "_p")))
         self.var_drop = tk.StringVar(value=str(self._cfg.get("tagger_drop", "")))
         self.var_pattern = tk.StringVar(value=str(self._cfg.get("tagger_pattern", "YYMMDDHHmmSS")))
+        self._tag_route_rules: List[Dict[str, str]] = self._parse_tag_route_rules_cfg(
+            self._cfg.get("tagger_route_rules")
+        )
+        self.var_tagger_route_auto = tk.BooleanVar(value=bool(self._cfg.get("tagger_route_auto", False)))
 
         self._ensure_oxco_compare_settings()
         self._build_ui()
@@ -390,6 +397,8 @@ class OxcoApp:
             self._chk_br_mp4.configure(text=self.tr("filters.mp4"))
         if getattr(self, "_chk_br_delete_src", None) is not None:
             self._chk_br_delete_src.configure(text=self.tr("filters.br_delete_source"))
+        if getattr(self, "_chk_tagger_route_auto", None) is not None:
+            self._chk_tagger_route_auto.configure(text=self.tr("flow.tag_route_auto"))
         if getattr(self, "_btn_br_preset", None) is not None:
             self._btn_br_preset.configure(text=self.tr("filters.apply_preset"))
         for lb, k in getattr(self, "_tagger_labels", []):
@@ -863,7 +872,21 @@ class OxcoApp:
         self._i18n_labeled.append((hint_tg, "flow.tagger_hint"))
         tr += 1
         self.btn_tagger = ttk.Button(t, text=self.tr("flow.process"), command=self._run_tagger)
-        self.btn_tagger.grid(row=tr, column=0, columnspan=3, padx=6, pady=8, sticky="w")
+        self.btn_tagger.grid(row=tr, column=0, columnspan=3, padx=6, pady=(8, 4), sticky="w")
+        tr += 1
+        trf = ttk.Frame(t)
+        trf.grid(row=tr, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 8))
+        self.btn_tag_route_setup = ttk.Button(trf, text=self.tr("flow.tag_route_setup"), command=self._open_tag_route_dialog)
+        self.btn_tag_route_setup.pack(side="left", padx=(0, 6))
+        ttk.Button(trf, text="(i)", width=3, command=self._help_tag_route).pack(side="left", padx=(0, 8))
+        self._chk_tagger_route_auto = ttk.Checkbutton(
+            trf, text=self.tr("flow.tag_route_auto"), variable=self.var_tagger_route_auto
+        )
+        self._chk_tagger_route_auto.pack(side="left", padx=(0, 8))
+        self.btn_tag_route_distribute = ttk.Button(
+            trf, text=self.tr("flow.tag_route_distribute"), command=self._run_tag_distribute
+        )
+        self.btn_tag_route_distribute.pack(side="left")
 
         self._pipe_lfs = ((c, "flow.step1"), (b, "flow.step2"), (t, "flow.step3"))
         self._pipe_btns = (
@@ -875,6 +898,8 @@ class OxcoApp:
             (self.btn_stop_br, "flow.stop"),
             (self.btn_tagger_refresh, "flow.tagger_refresh"),
             (self.btn_tagger, "flow.process"),
+            (self.btn_tag_route_setup, "flow.tag_route_setup"),
+            (self.btn_tag_route_distribute, "flow.tag_route_distribute"),
         )
         inner.after(1, self._sync_pipe_canvas)
 
@@ -1063,6 +1088,176 @@ class OxcoApp:
     def _help_suffix_drop(self) -> None:
         messagebox.showinfo(self.tr("help.drop.title"), self.tr("help.drop.body"))
 
+    def _help_tag_route(self) -> None:
+        messagebox.showinfo(self.tr("help.tag_route.title"), self.tr("help.tag_route.body"))
+
+    @staticmethod
+    def _parse_tag_route_rules_cfg(raw: object) -> List[Dict[str, str]]:
+        return [{"tag": t, "folder": f} for t, f in ow.normalize_tag_route_rules(raw)]
+
+    def _tag_route_rules_as_tuples(self) -> List[tuple[str, str]]:
+        return [(str(r.get("tag", "")).strip(), str(r.get("folder", "")).strip()) for r in self._tag_route_rules]
+
+    def _open_tag_route_dialog(self) -> None:
+        if self._tag_route_win is not None and self._tag_route_win.winfo_exists():
+            self._tag_route_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._tag_route_win = win
+        win.title(self.tr("flow.tag_route_title"))
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("640x380")
+        outer = ttk.Frame(win, padding=10)
+        outer.grid(row=0, column=0, sticky="nsew")
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+
+        hdr = ttk.Frame(outer)
+        hdr.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(hdr, text=self.tr("flow.tag_route_col_tag")).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(hdr, text=self.tr("flow.tag_route_col_folder")).grid(row=0, column=1, sticky="w")
+
+        scroll_host = ttk.Frame(outer)
+        scroll_host.grid(row=1, column=0, sticky="nsew")
+        scroll_host.columnconfigure(0, weight=1)
+        scroll_host.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(scroll_host, highlightthickness=0, height=220)
+        vsb = ttk.Scrollbar(scroll_host, orient="vertical", command=canvas.yview)
+        rows_fr = ttk.Frame(canvas)
+        rows_win = canvas.create_window((0, 0), window=rows_fr, anchor="nw")
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        def sync_scroll(_evt: Optional[tk.Event] = None) -> None:
+            canvas.update_idletasks()
+            rows_fr.update_idletasks()
+            cw = max(int(canvas.winfo_width()), 1)
+            canvas.itemconfig(rows_win, width=cw)
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+        rows_fr.bind("<Configure>", lambda e: sync_scroll())
+        canvas.bind("<Configure>", lambda e: sync_scroll() if e.widget == canvas else None)
+
+        self._tag_route_row_vars = []
+
+        def add_row(tag: str = "", folder: str = "") -> None:
+            v_tag = tk.StringVar(value=tag)
+            v_folder = tk.StringVar(value=folder)
+            self._tag_route_row_vars.append((v_tag, v_folder))
+            ri = len(self._tag_route_row_vars) - 1
+            row_fr = ttk.Frame(rows_fr)
+            row_fr.grid(row=ri, column=0, sticky="ew", pady=2)
+            row_fr.columnconfigure(1, weight=1)
+            ttk.Entry(row_fr, textvariable=v_tag, width=18).grid(row=0, column=0, sticky="w", padx=(0, 6))
+            ent_f = ttk.Entry(row_fr, textvariable=v_folder)
+            ent_f.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+            ttk.Button(
+                row_fr,
+                text="…",
+                width=3,
+                command=lambda v=v_folder: self._browse_dir_to_var(v),
+            ).grid(row=0, column=2, padx=(0, 4))
+
+            def remove_row() -> None:
+                try:
+                    self._tag_route_row_vars.remove((v_tag, v_folder))
+                except ValueError:
+                    pass
+                row_fr.destroy()
+                sync_scroll()
+
+            ttk.Button(row_fr, text=self.tr("flow.tag_route_remove"), command=remove_row).grid(
+                row=0, column=3, padx=(0, 0)
+            )
+            sync_scroll()
+
+        for rule in self._tag_route_rules:
+            add_row(str(rule.get("tag", "")), str(rule.get("folder", "")))
+        if not self._tag_route_rules:
+            add_row()
+
+        btn_fr = ttk.Frame(outer)
+        btn_fr.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+
+        def save_close() -> None:
+            collected: List[Dict[str, str]] = []
+            for v_tag, v_folder in self._tag_route_row_vars:
+                tag = v_tag.get().strip()
+                folder = v_folder.get().strip()
+                if tag and folder:
+                    collected.append({"tag": tag, "folder": folder})
+            self._tag_route_rules = collected
+            self._save()
+            win.destroy()
+            self._tag_route_win = None
+            self._tag_route_row_vars = []
+
+        def cancel() -> None:
+            win.destroy()
+            self._tag_route_win = None
+            self._tag_route_row_vars = []
+
+        ttk.Button(btn_fr, text=self.tr("flow.tag_route_add"), command=lambda: add_row()).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_fr, text=self.tr("flow.tag_route_save"), command=save_close).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_fr, text=self.tr("settings.cancel"), command=cancel).pack(side="left")
+        sync_scroll()
+        win.update_idletasks()
+        self._place_settings_window(win)
+
+    def _run_tag_distribute(self) -> None:
+        if self._tag_route_busy:
+            return
+        outp = self.var_tagger_out.get().strip()
+        if not outp:
+            messagebox.showerror(self.tr("err.input"), self.tr("err.tagger_folders"))
+            return
+        rules = self._tag_route_rules_as_tuples()
+        if not rules:
+            messagebox.showerror(self.tr("err.input"), self.tr("err.tag_route_no_rules"))
+            return
+        src = Path(outp)
+        if not src.is_dir():
+            messagebox.showerror(self.tr("err.input"), self.tr("err.tag_route_out_missing"))
+            return
+
+        lang = (self.var_ui_lang.get().strip() or "de").lower()
+        if lang not in ("de", "en"):
+            lang = "de"
+
+        def log(s: str) -> None:
+            self.root.after(0, lambda m=s: self._log(m))
+
+        self._tag_route_busy = True
+        self.btn_tag_route_distribute.configure(state="disabled")
+
+        def work() -> None:
+            self.root.after(0, lambda: self._log(self.tr("log.tag_route_start")))
+            moved, nomatch, err = ow.tagger_distribute_by_rules(src, rules, log=log, ui_lang=lang)
+            self.root.after(0, lambda: self._tag_distribute_done(moved, nomatch, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tag_distribute_done(self, moved: int, nomatch: int, err: int) -> None:
+        self._tag_route_busy = False
+        self.btn_tag_route_distribute.configure(state="normal")
+        self._log(self.tr("log.tag_route_done", moved=moved, nomatch=nomatch, err=err))
+        self._save()
+
+    def _maybe_auto_tag_distribute(self) -> None:
+        if not self.var_tagger_route_auto.get():
+            return
+        if not self._tag_route_rules_as_tuples():
+            return
+        if not self.var_tagger_out.get().strip():
+            return
+        self._run_tag_distribute()
+
     def _help_pattern(self) -> None:
         messagebox.showinfo(self.tr("help.pattern.title"), self.tr("help.pattern.body"))
 
@@ -1143,6 +1338,8 @@ class OxcoApp:
             "tagger_ignore": self.var_ignore.get(),
             "tagger_drop": self.var_drop.get(),
             "tagger_pattern": self.var_pattern.get().strip(),
+            "tagger_route_auto": self.var_tagger_route_auto.get(),
+            "tagger_route_rules": list(self._tag_route_rules),
         }
         for t in ow.RULE_ORDER:
             d[f"br_rule_{t}"] = self._br_rule_vars[t].get().strip()
@@ -1600,6 +1797,8 @@ class OxcoApp:
         self._log(self.tr("log.tagger_done", ok=ok, sk=skipped))
         self._tagger_refresh_list(log_count=False)
         self._save()
+        if ok > 0:
+            self._maybe_auto_tag_distribute()
 
 
 def _run_compare_cli_child_and_exit() -> None:

@@ -35,6 +35,8 @@
   "tagger_ignore": "_p",
   "tagger_drop": "",
   "tagger_pattern": "YYMMDDHHmmSS",
+  "tagger_route_auto": false,
+  "tagger_route_rules": [],
   "br_rule_2160": "12000",
   "br_rule_1440": "8000",
   "br_rule_1080": "5000",
