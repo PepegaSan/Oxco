@@ -280,7 +280,7 @@ DE: Dict[str, str] = {
         "Tag: Freier Text wie [Musik], der die gefundene Muster-Stelle ersetzt."
     ),
     "help.tag.title": "Tag",
-    "help.tag.body": "Text, der die gefundene Muster-Stelle im Dateinamen ersetzt — z. B. [Musik] oder [Anna].\nLeer lassen, wenn nur das Muster entfernt werden soll (ohne Ersatz).",
+    "help.tag.body": "Text, der die gefundene Muster-Stelle im Dateinamen ersetzt — z. B. [Musik] oder [Anna].\nFrei eintippen oder aus der Liste wählen (Tags aus „Tag-Verteilung“).\nLeer lassen, wenn nur das Muster entfernt werden soll (ohne Ersatz).",
     "help.profile.title": "Profilname",
     "help.profile.body": "Nur ein Ersatzname, falls nach dem Aufräumen fast nichts Sinnvolles vom alten Namen übrig bleibt.",
     "preview.files": "Dateien",
@@ -620,7 +620,7 @@ EN.update(
             "Tag: free text like [Music] that replaces the matched segment."
         ),
         "help.tag.title": "Tag",
-        "help.tag.body": "Text that replaces the matched pattern in the filename — e.g. [Music] or [Anna].\nLeave empty to remove the pattern only (no replacement).",
+        "help.tag.body": "Text that replaces the matched pattern in the filename — e.g. [Music] or [Anna].\nType freely or pick from the list (tags from “Tag routing”).\nLeave empty to remove the pattern only (no replacement).",
         "help.profile.title": "Profile name",
         "help.profile.body": "Fallback name if almost nothing sensible is left of the old name after cleanup.",
         "preview.files": "Files",

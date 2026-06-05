@@ -1003,7 +1003,8 @@ class OxcoApp:
         lab_tag = ttk.Label(t, text=self.tr("flow.tag"))
         lab_tag.grid(row=tr, column=0, sticky="nw", padx=6, pady=4)
         self._i18n_labeled.append((lab_tag, "flow.tag"))
-        ttk.Entry(t, textvariable=self.var_tag).grid(row=tr, column=1, sticky="ew", padx=4, pady=4)
+        self.cmb_tag = ttk.Combobox(t, textvariable=self.var_tag, values=self._tag_route_tag_choices())
+        self.cmb_tag.grid(row=tr, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(t, text="(i)", width=3, command=self._help_tag_text).grid(row=tr, column=2, padx=4, pady=4)
         tr += 1
         lab_prof = ttk.Label(t, text=self.tr("flow.profile"))
@@ -1272,6 +1273,26 @@ class OxcoApp:
     def _tag_route_rules_as_tuples(self) -> List[tuple[str, str]]:
         return [(str(r.get("tag", "")).strip(), str(r.get("folder", "")).strip()) for r in self._tag_route_rules]
 
+    def _tag_route_tag_choices(self) -> List[str]:
+        """Eindeutige Tags aus Tag-Verteilung (+ aktueller Wert) für die Combobox."""
+        seen: Set[str] = set()
+        out: List[str] = []
+        for rule in self._tag_route_rules:
+            tag = str(rule.get("tag") or "").strip()
+            key = tag.casefold()
+            if tag and key not in seen:
+                seen.add(key)
+                out.append(tag)
+        cur = self.var_tag.get().strip()
+        if cur and cur.casefold() not in seen:
+            out.insert(0, cur)
+        return out
+
+    def _refresh_tag_combobox_values(self) -> None:
+        if getattr(self, "cmb_tag", None) is None:
+            return
+        self.cmb_tag["values"] = self._tag_route_tag_choices()
+
     def _open_tag_route_dialog(self) -> None:
         if self._tag_route_win is not None and self._tag_route_win.winfo_exists():
             self._tag_route_win.lift()
@@ -1367,6 +1388,7 @@ class OxcoApp:
                 if tag and folder:
                     collected.append({"tag": tag, "folder": folder})
             self._tag_route_rules = collected
+            self._refresh_tag_combobox_values()
             self._save()
             win.destroy()
             self._tag_route_win = None
