@@ -590,6 +590,347 @@ def run_compare_subprocess(
     threading.Thread(target=_thread, daemon=True).start()
 
 
+# —— Compare Ordner-Listen (Dual-Tab) ——
+
+
+@dataclass
+class CompareFileEntry:
+    path: Path
+    rel: str
+    size: int
+    mtime: float
+    duration_sec: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    probe_ok: bool = False
+
+
+COMPARE_SIGNATURE_PALETTE: Tuple[str, ...] = (
+    "#dceefb",
+    "#fde2e2",
+    "#d9f2d9",
+    "#fdecd9",
+    "#e8dcf8",
+    "#d9f2ec",
+    "#fce4f3",
+    "#eef6d9",
+    "#dce4f8",
+    "#f6eed9",
+    "#d9eef6",
+    "#f0d9f6",
+)
+COMPARE_TAG_UNKNOWN = "cmp_probe_unknown"
+COMPARE_TAG_MATCH = "cmp_match_orig"
+
+
+def probe_compare_media(path: Path) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+    """Laufzeit (s) und Video-Auflösung via ffprobe, oder (None, None, None)."""
+    if not shutil.which("ffprobe"):
+        return None, None, None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format=duration",
+        "-show_entries",
+        "stream=width,height",
+        "-select_streams",
+        "v:0",
+        str(path),
+    ]
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    if completed.returncode != 0:
+        return None, None, None
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return None, None, None
+    duration: Optional[float] = None
+    fmt_dur = (payload.get("format") or {}).get("duration")
+    if fmt_dur is not None:
+        try:
+            duration = float(fmt_dur)
+        except (TypeError, ValueError):
+            duration = None
+    streams = payload.get("streams") or []
+    video_stream = streams[0] if streams else None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    if video_stream:
+        if video_stream.get("width") is not None:
+            try:
+                width = int(video_stream["width"])
+            except (TypeError, ValueError):
+                width = None
+        if video_stream.get("height") is not None:
+            try:
+                height = int(video_stream["height"])
+            except (TypeError, ValueError):
+                height = None
+    if duration is None or width is None or height is None:
+        return None, None, None
+    return duration, width, height
+
+
+def enrich_compare_entry_probe(entry: CompareFileEntry) -> None:
+    duration, width, height = probe_compare_media(entry.path)
+    if duration is None or width is None or height is None:
+        entry.probe_ok = False
+        entry.duration_sec = None
+        entry.width = None
+        entry.height = None
+        return
+    entry.duration_sec = duration
+    entry.width = width
+    entry.height = height
+    entry.probe_ok = True
+
+
+def compare_match_key(entry: CompareFileEntry) -> Optional[str]:
+    """Abgleich-Schlüssel wie in der UI (angezeigte Länge + Auflösung)."""
+    if not entry.probe_ok or entry.duration_sec is None:
+        return None
+    dur_label = fmt_compare_duration(entry.duration_sec)
+    if entry.width is None or entry.height is None:
+        return dur_label
+    return f"{dur_label}|{entry.width}x{entry.height}"
+
+
+def compare_media_signature(entry: CompareFileEntry) -> Optional[str]:
+    return compare_match_key(entry)
+
+
+def compare_signature_tag_map(
+    orig: Sequence[CompareFileEntry],
+    df: Sequence[CompareFileEntry],
+) -> Dict[str, str]:
+    """Signatur → Treeview-Tag (gleiche Signatur = gleiche Farbe in beiden Listen)."""
+    sigs: set[str] = set()
+    for e in orig:
+        s = compare_media_signature(e)
+        if s:
+            sigs.add(s)
+    for e in df:
+        s = compare_media_signature(e)
+        if s:
+            sigs.add(s)
+    return {sig: f"cmp_sig_{i}" for i, sig in enumerate(sorted(sigs))}
+
+
+def compare_pick_deepfake_for_original(
+    orig: CompareFileEntry,
+    df_entries: Sequence[CompareFileEntry],
+    pattern_text: str,
+) -> Optional[CompareFileEntry]:
+    """Erstes passendes Deepfake (Länge/Auflösung); Reihenfolge = ``df_entries``."""
+    ranked = compare_rank_deepfakes_for_original(orig, df_entries, pattern_text)
+    return ranked[0] if ranked else None
+
+
+def compare_rank_deepfakes_for_original(
+    orig: CompareFileEntry,
+    df_entries: Sequence[CompareFileEntry],
+    pattern_text: str,
+) -> List[CompareFileEntry]:
+    """Deepfakes passend zum Original (UI-Länge + Auflösung); Token zuerst."""
+    candidates: List[CompareFileEntry] = []
+    match_key = compare_match_key(orig)
+    if match_key:
+        candidates = [e for e in df_entries if compare_match_key(e) == match_key]
+    if (
+        not candidates
+        and orig.probe_ok
+        and orig.duration_sec is not None
+        and orig.width is not None
+        and orig.height is not None
+    ):
+        candidates = [
+            e
+            for e in df_entries
+            if e.probe_ok
+            and e.duration_sec is not None
+            and e.width == orig.width
+            and e.height == orig.height
+            and abs(e.duration_sec - orig.duration_sec) <= 2.0
+        ]
+    if not candidates:
+        return []
+    token = extract_pattern_match(orig.path.stem, pattern_text)
+    if token:
+        token_hits = [e for e in candidates if token in e.path.stem]
+        if token_hits:
+            token_keys = {compare_path_key(e.path) for e in token_hits}
+            rest = [e for e in candidates if compare_path_key(e.path) not in token_keys]
+            return token_hits + rest
+    return list(candidates)
+
+
+def compare_paths_equal(a: Path, b: Path) -> bool:
+    return compare_path_key(a) == compare_path_key(b)
+
+
+def compare_path_key(path: Path) -> str:
+    try:
+        return str(path.resolve()).casefold()
+    except OSError:
+        return str(path).casefold()
+
+
+def fmt_compare_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "—"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds - minutes * 60
+    return f"{minutes}:{int(secs):02d}"
+
+
+def fmt_compare_resolution(width: Optional[int], height: Optional[int]) -> str:
+    if width is None or height is None:
+        return "—"
+    return f"{width}×{height}"
+
+
+def scan_compare_folder(root: Path, recursive: bool) -> List[CompareFileEntry]:
+    """Videos unter ``root`` (optional rekursiv), mit relativem Pfad und Metadaten."""
+    if not root.is_dir():
+        return []
+    root = root.resolve()
+    out: List[CompareFileEntry] = []
+    for p in iter_video_files(root, recursive):
+        try:
+            st = p.stat()
+            try:
+                rel = p.relative_to(root).as_posix()
+            except ValueError:
+                rel = p.name
+            out.append(
+                CompareFileEntry(path=p, rel=rel, size=int(st.st_size), mtime=float(st.st_mtime))
+            )
+        except OSError:
+            continue
+    return out
+
+
+def _compare_duration_sort_key(entry: CompareFileEntry, *, desc: bool = False) -> Tuple[int, float, str]:
+    missing = 1 if entry.duration_sec is None else 0
+    dur = entry.duration_sec if entry.duration_sec is not None else 0.0
+    name = entry.path.name.casefold()
+    if desc:
+        return (missing, -dur, name)
+    return (missing, dur, name)
+
+
+def _compare_duration_group_key(entry: CompareFileEntry) -> str:
+    if entry.duration_sec is None:
+        return "—"
+    return fmt_compare_duration(round(entry.duration_sec, 1))
+
+
+def sort_compare_entries(entries: List[CompareFileEntry], mode: str) -> List[CompareFileEntry]:
+    mode = (mode or "date_desc").strip().lower()
+    if mode == "date_asc":
+        return sorted(entries, key=lambda e: e.mtime)
+    if mode == "date_desc":
+        return sorted(entries, key=lambda e: e.mtime, reverse=True)
+    if mode == "size_asc":
+        return sorted(entries, key=lambda e: e.size)
+    if mode == "size_desc":
+        return sorted(entries, key=lambda e: e.size, reverse=True)
+    if mode == "duration_asc":
+        return sorted(entries, key=lambda e: _compare_duration_sort_key(e))
+    if mode == "duration_desc":
+        return sorted(entries, key=lambda e: _compare_duration_sort_key(e, desc=True))
+    if mode == "name_desc":
+        return sorted(entries, key=lambda e: e.path.name.casefold(), reverse=True)
+    return sorted(entries, key=lambda e: e.path.name.casefold())
+
+
+def _compare_folder_group_key(rel: str) -> str:
+    parent = Path(rel.replace("\\", "/")).parent
+    s = parent.as_posix()
+    return s if s and s != "." else "."
+
+
+def _compare_date_group_key(mtime: float) -> str:
+    import datetime as _dt
+
+    return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+
+
+def _compare_letter_group_key(name: str) -> str:
+    stem = Path(name).stem
+    if not stem:
+        return "#"
+    c = stem[0].upper()
+    return c if c.isalnum() else "#"
+
+
+def _compare_group_duration_stat(items: Sequence[CompareFileEntry]) -> Tuple[int, float]:
+    durs = [e.duration_sec for e in items if e.duration_sec is not None]
+    if not durs:
+        return (1, 0.0)
+    return (0, max(durs))
+
+
+def group_compare_entries(
+    entries: List[CompareFileEntry], group: str, *, sort_mode: str = ""
+) -> List[Tuple[str, List[CompareFileEntry]]]:
+    group = (group or "none").strip().lower()
+    sort_mode = (sort_mode or "").strip().lower()
+    if group in ("none", ""):
+        return [("", list(entries))]
+    buckets: Dict[str, List[CompareFileEntry]] = {}
+    for e in entries:
+        if group == "folder":
+            key = _compare_folder_group_key(e.rel)
+        elif group == "date":
+            key = _compare_date_group_key(e.mtime)
+        elif group == "letter":
+            key = _compare_letter_group_key(e.path.name)
+        elif group == "duration":
+            key = _compare_duration_group_key(e)
+        else:
+            key = ""
+        buckets.setdefault(key, []).append(e)
+    items_pairs = list(buckets.items())
+    if sort_mode in ("duration_desc", "duration_asc"):
+        desc = sort_mode == "duration_desc"
+
+        def _grp_dur_key(item: Tuple[str, List[CompareFileEntry]]) -> Tuple[int, float, str]:
+            label, grp_items = item
+            missing, dur = _compare_group_duration_stat(grp_items)
+            return (missing, -dur if desc else dur, label.casefold())
+
+        items_pairs = sorted(items_pairs, key=_grp_dur_key)
+        return [(label, sort_compare_entries(grp_items, sort_mode)) for label, grp_items in items_pairs]
+    if group == "duration":
+
+        def _dur_bucket_order(item: Tuple[str, List[CompareFileEntry]]) -> Tuple[int, float, str]:
+            label, grp_items = item
+            if label == "—":
+                return (1, 0.0, label)
+            missing, dur = _compare_group_duration_stat(grp_items)
+            return (missing, dur, label)
+
+        items_pairs = sorted(items_pairs, key=_dur_bucket_order)
+    else:
+        items_pairs = sorted(items_pairs, key=lambda kv: kv[0].casefold())
+    return items_pairs
+
+
 # —— Autotagger (Watchdog tagger — Einmal-Lauf, ein Profil) ——
 
 
@@ -630,6 +971,46 @@ def parse_drop_suffix_entries(raw_text: str) -> List[DropStripEntry]:
             value = f"_{value}"
         out.append(value.lower())
     return out
+
+
+def compare_export_tag_suffix(
+    buffer_seconds: float,
+    noise_thresh: int,
+    pixel_thresh: int,
+    changed_pixels_max: int = 0,
+) -> str:
+    """Wie ``compare.compare_export_filename_tag`` (Kleinbuchstaben für Suffix-Vergleich)."""
+    b = f"{float(buffer_seconds):g}".replace(".", "-")
+    s = f"_b{b}_n{int(noise_thresh)}_p{int(pixel_thresh)}"
+    mx = int(changed_pixels_max) if changed_pixels_max else 0
+    if mx > 0:
+        s += f"_m{mx}"
+    return s.lower()
+
+
+def build_automatic_tagger_drop_entries(
+    buffer_seconds: float,
+    noise_thresh: int,
+    pixel_thresh: int,
+    changed_pixels_max: int,
+    bitrate_output_suffix: str,
+) -> List[DropStripEntry]:
+    """Compare-/DaVinci-/Bitrate-Endungen — immer beim Taggen entfernen (nicht über Drop-Suffixe)."""
+    entries: List[DropStripEntry] = []
+    entries.append(
+        compare_export_tag_suffix(
+            buffer_seconds, noise_thresh, pixel_thresh, changed_pixels_max
+        )
+    )
+    entries.append(re.compile(r"_davinci_export\Z", re.IGNORECASE))
+    # Andere Compare-Läufe (andere Schwellen) am Namensende
+    entries.append(re.compile(r"_b[\d][\w.-]*_n\d+_p\d+(?:_m\d+)?\Z", re.IGNORECASE))
+    sfx = (bitrate_output_suffix or "_bitrate").strip()
+    if not sfx.startswith("_"):
+        sfx = f"_{sfx}"
+    if sfx:
+        entries.append(sfx.lower())
+    return entries
 
 
 def extract_pattern_match(original_stem: str, pattern_text: str) -> str:
@@ -700,10 +1081,18 @@ def remove_date_token(original_stem: str, pattern_text: str) -> str:
     return cleaned.strip("_- ")
 
 
-def remove_trailing_suffixes(stem: str, keep_csv: str, drop_csv: str) -> str:
+def remove_trailing_suffixes(
+    stem: str,
+    keep_csv: str,
+    drop_csv: str,
+    *,
+    extra_drop_entries: Optional[Sequence[DropStripEntry]] = None,
+) -> str:
     keep_list = parse_suffix_list(keep_csv)
     drop_entries = parse_drop_suffix_entries(drop_csv)
     all_entries: List[DropStripEntry] = list(keep_list) + list(drop_entries)
+    if extra_drop_entries:
+        all_entries.extend(extra_drop_entries)
     current = stem
     changed = True
     while changed and current:
@@ -745,6 +1134,8 @@ def build_tagger_target_name(
     keep_csv: str,
     drop_csv: str,
     pattern_text: str,
+    *,
+    auto_drop_entries: Optional[Sequence[DropStripEntry]] = None,
 ) -> str:
     found = extract_pattern_match(stem, pattern_text)
     if not found:
@@ -756,7 +1147,9 @@ def build_tagger_target_name(
         base_name = stem.replace(found, tag_text, 1)
     else:
         base_name = remove_date_token(stem, pattern_text)
-    base_name = remove_trailing_suffixes(base_name, keep_csv, drop_csv)
+    base_name = remove_trailing_suffixes(
+        base_name, keep_csv, drop_csv, extra_drop_entries=auto_drop_entries
+    )
     while "__" in base_name:
         base_name = base_name.replace("__", "_")
     while "--" in base_name:
@@ -784,6 +1177,11 @@ def tagger_process_folder(
     log: Callable[[str], None],
     only_files: Optional[Sequence[Path]] = None,
     ui_lang: str = "de",
+    filter_buffer_seconds: float = 2.0,
+    filter_noise_threshold: int = 15,
+    filter_pixel_threshold: int = 200,
+    filter_pixel_max_threshold: int = 0,
+    bitrate_output_suffix: str = "_bitrate",
 ) -> Tuple[int, int]:
     """Process ``.mp4`` in the folder (non-recursive). If ``only_files`` is set, only those paths (must be under input_dir).
 
@@ -799,6 +1197,13 @@ def tagger_process_folder(
             return 0, 0
     else:
         files = all_files
+    auto_drop = build_automatic_tagger_drop_entries(
+        filter_buffer_seconds,
+        filter_noise_threshold,
+        filter_pixel_threshold,
+        filter_pixel_max_threshold,
+        bitrate_output_suffix,
+    )
     ok = 0
     skipped = 0
     for fp in files:
@@ -817,7 +1222,13 @@ def tagger_process_folder(
                 skipped += 1
                 continue
             new_name = build_tagger_target_name(
-                stem, tag, profile_name, keep_suffix_csv, drop_suffix_csv, pattern_text
+                stem,
+                tag,
+                profile_name,
+                keep_suffix_csv,
+                drop_suffix_csv,
+                pattern_text,
+                auto_drop_entries=auto_drop,
             )
             target = output_dir / new_name
             target = make_unique_path(target)
@@ -845,11 +1256,43 @@ def normalize_tag_route_rules(raw: object) -> List[Tuple[str, str]]:
     return out
 
 
+def _tag_route_bracket_segments(filename: str) -> List[str]:
+    """Inhalte in eckigen Klammern, z. B. ``[Julia Berens]`` → ``Julia Berens``."""
+    return [m.group(1).strip() for m in re.finditer(r"\[([^\]]+)\]", filename)]
+
+
+def _tag_route_inner_label(tag: str) -> str:
+    t = tag.strip()
+    if t.startswith("[") and t.endswith("]") and len(t) >= 2:
+        return t[1:-1].strip()
+    return t
+
+
+def _tag_route_match_pattern(tag: str) -> re.Pattern:
+    """Tag im Dateinamen, nicht als Teil eines längeren Namens (Julia ≠ Julia Berens)."""
+    escaped = re.escape(tag.strip())
+    return re.compile(
+        rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])(?!\s+[A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+
+
 def pick_tag_route_for_filename(filename: str, rules: Sequence[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
-    """Erste Regel, deren Tag als Teilstring im Dateinamen vorkommt (case-insensitive)."""
-    name_fold = filename.casefold()
-    for tag, folder in rules:
-        if tag.casefold() in name_fold:
+    """Längster passender Tag zuerst; Klammer-Inhalt exakt (``[Julia]`` ≠ ``[Julia Berens]``)."""
+    ordered = sorted(rules, key=lambda r: len(r[0].strip()), reverse=True)
+    segments_fold = [s.casefold() for s in _tag_route_bracket_segments(filename)]
+
+    for tag, folder in ordered:
+        tag = tag.strip()
+        if not tag:
+            continue
+        label = _tag_route_inner_label(tag)
+        label_fold = label.casefold()
+        if segments_fold:
+            if label_fold in segments_fold:
+                return tag, folder
+            continue
+        if _tag_route_match_pattern(tag).search(filename):
             return tag, folder
     return None
 

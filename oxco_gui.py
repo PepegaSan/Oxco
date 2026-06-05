@@ -13,13 +13,14 @@ import sys
 import threading
 import tkinter as tk
 import configparser
+import datetime as _dt
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 import oxco_workers as ow
 import oxco_i18n as oi
-from oxco_player import OxcoVideoPreview
+from oxco_player import OxcoTaggerPreview, OxcoVideoPreview
 
 CONFIG_NAME = "oxco_config.json"
 
@@ -120,6 +121,18 @@ class OxcoApp:
         self._compare_busy = False
         self._compare_proc: Optional[Any] = None
         self._compare_user_stopped = False
+        self._compare_batch_queue: List[tuple[str, str]] = []
+        self._compare_batch_index = 0
+        self._compare_batch_mode = False
+        self._compare_patched_ini: Optional[str] = None
+        self._compare_orig_entries: List[ow.CompareFileEntry] = []
+        self._compare_df_entries: List[ow.CompareFileEntry] = []
+        self._compare_orig_by_iid: Dict[str, Path] = {}
+        self._compare_df_by_iid: Dict[str, Path] = {}
+        self._compare_probe_generation = 0
+        self._compare_selected_orig_sig: Optional[str] = None
+        self._compare_suppress_tree_select = False
+        self._compare_orig_select_after: Optional[str] = None
         self._bitrate_rows: List[ow.VideoRow] = []
         self._bitrate_scan_folder: Optional[Path] = None
         self._bitrate_stop = threading.Event()
@@ -128,6 +141,7 @@ class OxcoApp:
         self._pipe_canvas: Optional[tk.Canvas] = None
         self._pipe_win_id: Optional[int] = None
         self._video_preview: Optional[OxcoVideoPreview] = None
+        self._tagger_preview: Optional[OxcoTaggerPreview] = None
         self._notebook: Optional[ttk.Notebook] = None
         self._settings_win: Optional[tk.Toplevel] = None
         self._tag_route_win: Optional[tk.Toplevel] = None
@@ -221,6 +235,16 @@ class OxcoApp:
             self._cfg.get("tagger_route_rules")
         )
         self.var_tagger_route_auto = tk.BooleanVar(value=bool(self._cfg.get("tagger_route_auto", False)))
+
+        self.var_compare_source_dir = tk.StringVar(
+            value=str(self._cfg.get("compare_source_dir", "")).strip()
+        )
+        self.var_compare_deepfake_dir = tk.StringVar(
+            value=str(self._cfg.get("compare_deepfake_dir", "")).strip()
+        )
+        self.var_compare_recursive = tk.BooleanVar(value=bool(self._cfg.get("compare_recursive", True)))
+        self.var_compare_sort = tk.StringVar(value=str(self._cfg.get("compare_sort", "date_desc")))
+        self.var_compare_group = tk.StringVar(value=str(self._cfg.get("compare_group", "folder")))
 
         self._ensure_oxco_compare_settings()
         self._build_ui()
@@ -399,6 +423,22 @@ class OxcoApp:
             self._chk_br_delete_src.configure(text=self.tr("filters.br_delete_source"))
         if getattr(self, "_chk_tagger_route_auto", None) is not None:
             self._chk_tagger_route_auto.configure(text=self.tr("flow.tag_route_auto"))
+        if getattr(self, "_chk_compare_recursive", None) is not None:
+            self._chk_compare_recursive.configure(text=self.tr("flow.compare_recursive"))
+        if hasattr(self, "_compare_sort_values"):
+            self._compare_sort_labels = [self.tr(f"flow.compare_sort.{k}") for k in self._compare_sort_values]
+            if getattr(self, "_cb_compare_sort", None) is not None:
+                cur = self.var_compare_sort.get().strip() or "date_desc"
+                self._cb_compare_sort.configure(values=self._compare_sort_labels)
+                self._sync_compare_sort_combo_from_var()
+        if hasattr(self, "_compare_group_values"):
+            self._compare_group_labels = [self.tr(f"flow.compare_group.{k}") for k in self._compare_group_values]
+            if getattr(self, "_cb_compare_group", None) is not None:
+                self._cb_compare_group.configure(values=self._compare_group_labels)
+                self._sync_compare_group_combo_from_var()
+        if getattr(self, "tree_compare_orig", None) is not None:
+            self._compare_setup_tree_columns(self.tree_compare_orig)
+            self._compare_setup_tree_columns(self.tree_compare_df)
         if getattr(self, "_btn_br_preset", None) is not None:
             self._btn_br_preset.configure(text=self.tr("filters.apply_preset"))
         for lb, k in getattr(self, "_tagger_labels", []):
@@ -406,6 +446,8 @@ class OxcoApp:
         self._refresh_tree_headings()
         if self._video_preview is not None:
             self._video_preview.apply_i18n()
+        if self._tagger_preview is not None:
+            self._tagger_preview.apply_i18n()
 
     def _refresh_tree_headings(self) -> None:
         if not hasattr(self, "tree"):
@@ -773,8 +815,128 @@ class OxcoApp:
         self._btn_pipe_df = ttk.Button(c, text=self.tr("flow.file_btn"), command=self._browse_df)
         self._btn_pipe_df.grid(row=1, column=2, padx=4, pady=4, sticky="e")
         self._i18n_labeled.append((self._btn_pipe_df, "flow.file_btn"))
+
+        scan_fr = ttk.Frame(c)
+        scan_fr.grid(row=2, column=0, columnspan=3, sticky="ew", padx=4, pady=(4, 2))
+        scan_fr.columnconfigure(1, weight=1)
+        scan_fr.columnconfigure(3, weight=1)
+        cr = 0
+        lab_csd = ttk.Label(scan_fr, text=self.tr("flow.compare_src_dir"))
+        lab_csd.grid(row=cr, column=0, sticky="w", padx=(2, 4), pady=2)
+        self._i18n_labeled.append((lab_csd, "flow.compare_src_dir"))
+        ttk.Entry(scan_fr, textvariable=self.var_compare_source_dir).grid(
+            row=cr, column=1, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(scan_fr, text="…", width=3, command=lambda: self._browse_dir(self.var_compare_source_dir)).grid(
+            row=cr, column=2, padx=2, pady=2
+        )
+        lab_cdd = ttk.Label(scan_fr, text=self.tr("flow.compare_df_dir"))
+        lab_cdd.grid(row=cr, column=3, sticky="w", padx=(8, 4), pady=2)
+        self._i18n_labeled.append((lab_cdd, "flow.compare_df_dir"))
+        ttk.Entry(scan_fr, textvariable=self.var_compare_deepfake_dir).grid(
+            row=cr, column=4, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(scan_fr, text="…", width=3, command=lambda: self._browse_dir(self.var_compare_deepfake_dir)).grid(
+            row=cr, column=5, padx=2, pady=2
+        )
+        cr += 1
+        scan_tool = ttk.Frame(scan_fr)
+        scan_tool.grid(row=cr, column=0, columnspan=6, sticky="ew", pady=(4, 2))
+        self._chk_compare_recursive = ttk.Checkbutton(
+            scan_tool, text=self.tr("flow.compare_recursive"), variable=self.var_compare_recursive
+        )
+        self._chk_compare_recursive.pack(side="left", padx=(0, 8))
+        self.btn_compare_load = ttk.Button(
+            scan_tool, text=self.tr("flow.compare_load_lists"), command=self._compare_scan_lists
+        )
+        self.btn_compare_load.pack(side="left", padx=(0, 8))
+        lab_sort = ttk.Label(scan_tool, text=self.tr("flow.compare_sort"))
+        lab_sort.pack(side="left", padx=(0, 4))
+        self._i18n_labeled.append((lab_sort, "flow.compare_sort"))
+        self._compare_sort_values = (
+            "date_desc",
+            "date_asc",
+            "duration_desc",
+            "duration_asc",
+            "size_desc",
+            "size_asc",
+            "name_asc",
+            "name_desc",
+        )
+        self._compare_sort_labels = [self.tr(f"flow.compare_sort.{k}") for k in self._compare_sort_values]
+        self._cb_compare_sort = ttk.Combobox(
+            scan_tool,
+            values=self._compare_sort_labels,
+            width=22,
+            state="readonly",
+        )
+        self._cb_compare_sort.pack(side="left", padx=(0, 8))
+        self._cb_compare_sort.bind("<<ComboboxSelected>>", lambda _e: self._compare_on_sort_group_change())
+        self._sync_compare_sort_combo_from_var()
+        lab_grp = ttk.Label(scan_tool, text=self.tr("flow.compare_group"))
+        lab_grp.pack(side="left", padx=(0, 4))
+        self._i18n_labeled.append((lab_grp, "flow.compare_group"))
+        self._compare_group_values = ("none", "folder", "date", "duration", "letter")
+        self._compare_group_labels = [self.tr(f"flow.compare_group.{k}") for k in self._compare_group_values]
+        self._cb_compare_group = ttk.Combobox(
+            scan_tool,
+            values=self._compare_group_labels,
+            width=16,
+            state="readonly",
+        )
+        self._cb_compare_group.pack(side="left")
+        self._cb_compare_group.bind("<<ComboboxSelected>>", lambda _e: self._compare_on_sort_group_change())
+        self._sync_compare_group_combo_from_var()
+
+        dual_fr = ttk.Frame(c)
+        dual_fr.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=4, pady=4)
+        c.rowconfigure(3, weight=1)
+        dual_fr.columnconfigure(0, weight=1)
+        dual_fr.columnconfigure(1, weight=1)
+        dual_fr.rowconfigure(1, weight=1)
+        lab_lo = ttk.Label(dual_fr, text=self.tr("flow.original"))
+        lab_lo.grid(row=0, column=0, sticky="w", padx=2)
+        lab_ld = ttk.Label(dual_fr, text=self.tr("flow.deepfake"))
+        lab_ld.grid(row=0, column=1, sticky="w", padx=2)
+        cmp_cols = ("name", "rel", "duration", "res", "size", "mtime")
+        left_wrap = ttk.Frame(dual_fr)
+        left_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        left_wrap.columnconfigure(0, weight=1)
+        left_wrap.rowconfigure(0, weight=1)
+        self.tree_compare_orig = ttk.Treeview(
+            left_wrap, columns=cmp_cols, show="tree headings", height=8, selectmode="browse"
+        )
+        self.tree_compare_orig.grid(row=0, column=0, sticky="nsew")
+        osb = ttk.Scrollbar(left_wrap, orient="vertical", command=self.tree_compare_orig.yview)
+        osb.grid(row=0, column=1, sticky="ns")
+        self.tree_compare_orig.configure(yscrollcommand=osb.set)
+        right_wrap = ttk.Frame(dual_fr)
+        right_wrap.grid(row=1, column=1, sticky="nsew", padx=(4, 0))
+        right_wrap.columnconfigure(0, weight=1)
+        right_wrap.rowconfigure(0, weight=1)
+        self.tree_compare_df = ttk.Treeview(
+            right_wrap, columns=cmp_cols, show="tree headings", height=8, selectmode="extended"
+        )
+        self.tree_compare_df.grid(row=0, column=0, sticky="nsew")
+        dsb = ttk.Scrollbar(right_wrap, orient="vertical", command=self.tree_compare_df.yview)
+        dsb.grid(row=0, column=1, sticky="ns")
+        self.tree_compare_df.configure(yscrollcommand=dsb.set)
+        self._compare_setup_tree_columns(self.tree_compare_orig)
+        self._compare_setup_tree_columns(self.tree_compare_df)
+        self._compare_configure_tree_tags(self.tree_compare_orig)
+        self._compare_configure_tree_tags(self.tree_compare_df)
+        self.tree_compare_orig.bind("<<TreeviewSelect>>", self._compare_on_orig_select)
+        self.tree_compare_orig.bind("<ButtonRelease-1>", self._compare_on_orig_select)
+        self.tree_compare_df.bind("<<TreeviewSelect>>", self._compare_on_df_select)
+        hint_color = ttk.Label(c, text=self.tr("flow.compare_color_hint"), foreground="gray", wraplength=640)
+        hint_color.grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 2))
+        self._i18n_labeled.append((hint_color, "flow.compare_color_hint"))
+        hint_batch = ttk.Label(c, text=self.tr("flow.compare_batch_hint"), foreground="gray", wraplength=640)
+        hint_batch.grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 2))
+        self._i18n_labeled.append((hint_batch, "flow.compare_batch_hint"))
+
         cf = ttk.Frame(c)
-        cf.grid(row=2, column=0, columnspan=3, padx=6, pady=8, sticky="w")
+        cf.grid(row=6, column=0, columnspan=3, padx=6, pady=8, sticky="w")
         self.btn_compare = ttk.Button(cf, text=self.tr("flow.run_compare"), command=self._run_compare)
         self.btn_compare.pack(side="left", padx=(0, 6))
         self.btn_compare_stop = ttk.Button(
@@ -784,10 +946,14 @@ class OxcoApp:
         self.btn_compare_retry = ttk.Button(
             cf, text=self.tr("flow.compare_retry"), command=self._retry_compare, state="disabled"
         )
-        self.btn_compare_retry.pack(side="left")
+        self.btn_compare_retry.pack(side="left", padx=(0, 6))
+        self.btn_compare_batch = ttk.Button(
+            cf, text=self.tr("flow.compare_run_batch"), command=self._run_compare_batch
+        )
+        self.btn_compare_batch.pack(side="left")
 
         thr_row = ttk.Frame(c)
-        thr_row.grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
+        thr_row.grid(row=7, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
         thr_row.columnconfigure(2, weight=1)
         fl_pm_flow = ttk.Label(thr_row, text=self.tr("filters.pixel_max"))
         fl_pm_flow.grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -857,15 +1023,21 @@ class OxcoApp:
         tag_tree_fr = ttk.Frame(t)
         tag_tree_fr.grid(row=tr, column=0, columnspan=3, sticky="nsew", padx=4, pady=4)
         tag_tree_fr.columnconfigure(0, weight=1)
+        tag_tree_fr.columnconfigure(1, weight=0)
         tag_tree_fr.rowconfigure(0, weight=1)
         t.rowconfigure(tr, weight=1)
-        self.tree_tagger = ttk.Treeview(tag_tree_fr, columns=("tf",), show="headings", height=6, selectmode="extended")
-        self.tree_tagger.column("tf", width=520, minwidth=120)
+        self.tree_tagger = ttk.Treeview(
+            tag_tree_fr, columns=("tf",), show="headings", height=6, selectmode="extended"
+        )
+        self.tree_tagger.column("tf", width=380, minwidth=120)
         self.tree_tagger.grid(row=0, column=0, sticky="nsew")
         ttsb = ttk.Scrollbar(tag_tree_fr, orient="vertical", command=self.tree_tagger.yview)
         ttsb.grid(row=0, column=1, sticky="ns")
         self.tree_tagger.configure(yscrollcommand=ttsb.set)
         self.tree_tagger.heading("tf", text=self.tr("flow.tagger_tree_file"))
+        self.tree_tagger.bind("<<TreeviewSelect>>", self._on_tagger_tree_select)
+        self._tagger_preview = OxcoTaggerPreview(tag_tree_fr, host_app=self)
+        self._tagger_preview.grid(row=0, column=2, rowspan=1, sticky="n", padx=(8, 0))
         tr += 1
         hint_tg = ttk.Label(t, text=self.tr("flow.tagger_hint"), foreground="gray", wraplength=640)
         hint_tg.grid(row=tr, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
@@ -893,6 +1065,8 @@ class OxcoApp:
             (self.btn_compare, "flow.run_compare"),
             (self.btn_compare_stop, "flow.compare_stop"),
             (self.btn_compare_retry, "flow.compare_retry"),
+            (self.btn_compare_batch, "flow.compare_run_batch"),
+            (self.btn_compare_load, "flow.compare_load_lists"),
             (self.btn_scan, "flow.scan"),
             (self.btn_conv, "flow.convert"),
             (self.btn_stop_br, "flow.stop"),
@@ -1340,6 +1514,11 @@ class OxcoApp:
             "tagger_pattern": self.var_pattern.get().strip(),
             "tagger_route_auto": self.var_tagger_route_auto.get(),
             "tagger_route_rules": list(self._tag_route_rules),
+            "compare_source_dir": self.var_compare_source_dir.get().strip(),
+            "compare_deepfake_dir": self.var_compare_deepfake_dir.get().strip(),
+            "compare_recursive": self.var_compare_recursive.get(),
+            "compare_sort": self.var_compare_sort.get().strip() or "date_desc",
+            "compare_group": self.var_compare_group.get().strip() or "folder",
         }
         for t in ow.RULE_ORDER:
             d[f"br_rule_{t}"] = self._br_rule_vars[t].get().strip()
@@ -1351,6 +1530,8 @@ class OxcoApp:
     def _on_close(self) -> None:
         if self._video_preview is not None:
             self._video_preview.shutdown()
+        if self._tagger_preview is not None:
+            self._tagger_preview.shutdown()
         self._save()
         self.root.destroy()
 
@@ -1383,27 +1564,455 @@ class OxcoApp:
             rules[t] = v
         return rules
 
-    def _run_compare(self, *, retry_export_only: bool = False) -> None:
-        if self._compare_busy:
-            messagebox.showinfo(self.tr("info.note"), self.tr("info.compare_busy"))
+    def _fmt_file_size(self, nbytes: int) -> str:
+        n = int(nbytes)
+        if n >= 1024**3:
+            return f"{n / 1024**3:.1f} GB"
+        if n >= 1024**2:
+            return f"{n / 1024**2:.1f} MB"
+        if n >= 1024:
+            return f"{n / 1024:.0f} KB"
+        return f"{n} B"
+
+    def _fmt_mtime(self, mtime: float) -> str:
+        return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+    def _sync_compare_sort_combo_from_var(self) -> None:
+        key = self.var_compare_sort.get().strip() or "date_desc"
+        if not hasattr(self, "_compare_sort_values"):
             return
+        if key not in self._compare_sort_values:
+            key = "date_desc"
+            self.var_compare_sort.set(key)
+        idx = self._compare_sort_values.index(key)
+        if getattr(self, "_cb_compare_sort", None) is not None:
+            self._cb_compare_sort.current(idx)
+
+    def _sync_compare_group_combo_from_var(self) -> None:
+        key = self.var_compare_group.get().strip() or "folder"
+        if not hasattr(self, "_compare_group_values"):
+            return
+        if key not in self._compare_group_values:
+            key = "folder"
+            self.var_compare_group.set(key)
+        idx = self._compare_group_values.index(key)
+        if getattr(self, "_cb_compare_group", None) is not None:
+            self._cb_compare_group.current(idx)
+
+    def _compare_on_sort_group_change(self) -> None:
+        if getattr(self, "_cb_compare_sort", None) is not None:
+            si = self._cb_compare_sort.current()
+            if 0 <= si < len(self._compare_sort_values):
+                self.var_compare_sort.set(self._compare_sort_values[si])
+        if getattr(self, "_cb_compare_group", None) is not None:
+            gi = self._cb_compare_group.current()
+            if 0 <= gi < len(self._compare_group_values):
+                self.var_compare_group.set(self._compare_group_values[gi])
+        self._compare_rebuild_trees()
+
+    def _compare_setup_tree_columns(self, tree: ttk.Treeview) -> None:
+        tree.heading("#0", text="")
+        tree.column("#0", width=100, minwidth=50)
+        tree.heading("name", text=self.tr("flow.compare_tree_name"))
+        tree.heading("rel", text=self.tr("flow.compare_tree_rel"))
+        tree.heading("duration", text=self.tr("flow.compare_tree_duration"))
+        tree.heading("res", text=self.tr("flow.compare_tree_res"))
+        tree.heading("size", text=self.tr("flow.compare_tree_size"))
+        tree.heading("mtime", text=self.tr("flow.compare_tree_date"))
+        tree.column("name", width=140, minwidth=70)
+        tree.column("rel", width=120, minwidth=50)
+        tree.column("duration", width=56, minwidth=44)
+        tree.column("res", width=72, minwidth=52)
+        tree.column("size", width=64, minwidth=44)
+        tree.column("mtime", width=108, minwidth=72)
+
+    def _compare_configure_tree_tags(self, tree: ttk.Treeview) -> None:
+        tree.tag_configure(ow.COMPARE_TAG_UNKNOWN, background="#ececec")
+        tree.tag_configure(ow.COMPARE_TAG_MATCH, background="#fff3b0")
+        for i, color in enumerate(ow.COMPARE_SIGNATURE_PALETTE):
+            tree.tag_configure(f"cmp_sig_{i}", background=color)
+
+    def _compare_extra_sig_color(self, index: int) -> str:
+        r = 200 + (index * 17) % 48
+        g = 200 + (index * 29) % 48
+        b = 200 + (index * 41) % 48
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _compare_apply_signature_tags(
+        self,
+        tree: ttk.Treeview,
+        sig_map: Dict[str, str],
+    ) -> None:
+        for tag in set(sig_map.values()):
+            idx = int(tag.rsplit("_", 1)[-1])
+            if idx < len(ow.COMPARE_SIGNATURE_PALETTE):
+                color = ow.COMPARE_SIGNATURE_PALETTE[idx]
+            else:
+                color = self._compare_extra_sig_color(idx)
+            tree.tag_configure(tag, background=color)
+
+    def _compare_entry_for_path(
+        self, path: Path, entries: List[ow.CompareFileEntry]
+    ) -> Optional[ow.CompareFileEntry]:
+        for e in entries:
+            if ow.compare_paths_equal(e.path, path):
+                return e
+        name_matches = [e for e in entries if e.path.name == path.name]
+        if len(name_matches) == 1:
+            return name_matches[0]
+        return None
+
+    def _compare_resolve_orig_path(self, evt: Optional[tk.Event]) -> Optional[Path]:
+        tree = self.tree_compare_orig
+        if evt is not None and getattr(evt, "y", None) is not None:
+            try:
+                iid = str(tree.identify_row(evt.y))
+            except tk.TclError:
+                iid = ""
+            if iid and not iid.startswith("grp_"):
+                p = self._compare_orig_by_iid.get(iid)
+                if p is not None:
+                    return p
+        return self._compare_single_selected_path(tree, self._compare_orig_by_iid)
+
+    def _compare_row_tags(
+        self,
+        entry: ow.CompareFileEntry,
+        sig_map: Dict[str, str],
+        *,
+        match_signature: Optional[str],
+    ) -> tuple[str, ...]:
+        sig = ow.compare_match_key(entry)
+        tags: List[str] = []
+        if sig and sig in sig_map:
+            tags.append(sig_map[sig])
+        elif not entry.probe_ok:
+            tags.append(ow.COMPARE_TAG_UNKNOWN)
+        if match_signature and sig and sig == match_signature:
+            tags.append(ow.COMPARE_TAG_MATCH)
+        return tuple(tags)
+
+    def _compare_make_group_iid(self, prefix: str, grp_name: str, used: Set[str]) -> str:
+        safe = (
+            grp_name.replace("\\", "_")
+            .replace("/", "_")
+            .replace(":", "_")
+            .replace(" ", "_")
+        )
+        base = f"grp_{prefix}_{safe}"
+        iid = base
+        n = 0
+        while iid in used:
+            n += 1
+            iid = f"{base}_{n}"
+        used.add(iid)
+        return iid
+
+    def _compare_fill_tree(
+        self,
+        tree: ttk.Treeview,
+        entries: List[ow.CompareFileEntry],
+        by_iid: Dict[str, Path],
+        prefix: str,
+        sig_map: Dict[str, str],
+        *,
+        match_signature: Optional[str] = None,
+    ) -> None:
+        tree.delete(*tree.get_children())
+        by_iid.clear()
+        sort_key = self.var_compare_sort.get().strip() or "date_desc"
+        group_key = self.var_compare_group.get().strip() or "folder"
+        sorted_entries = ow.sort_compare_entries(entries, sort_key)
+        groups = ow.group_compare_entries(sorted_entries, group_key, sort_mode=sort_key)
+        empty_vals = ("", "", "", "", "", "")
+        file_idx = 0
+        used_group_iids: Set[str] = set()
+        for grp_name, grp_items in groups:
+            parent_iid = ""
+            if grp_name and group_key != "none":
+                parent_iid = self._compare_make_group_iid(prefix, grp_name, used_group_iids)
+                tree.insert(
+                    "",
+                    "end",
+                    iid=parent_iid,
+                    text=grp_name,
+                    values=empty_vals,
+                    open=True,
+                )
+            for e in grp_items:
+                iid = f"f_{prefix}_{file_idx}"
+                file_idx += 1
+                by_iid[iid] = e.path
+                row_tags = self._compare_row_tags(
+                    e, sig_map, match_signature=match_signature
+                )
+                insert_kw: Dict[str, Any] = {
+                    "iid": iid,
+                    "text": "",
+                    "values": (
+                        e.path.name,
+                        e.rel,
+                        ow.fmt_compare_duration(e.duration_sec),
+                        ow.fmt_compare_resolution(e.width, e.height),
+                        self._fmt_file_size(e.size),
+                        self._fmt_mtime(e.mtime),
+                    ),
+                }
+                if row_tags:
+                    insert_kw["tags"] = row_tags
+                tree.insert(parent_iid, "end", **insert_kw)
+
+    def _compare_rebuild_trees(self) -> None:
+        if not getattr(self, "tree_compare_orig", None):
+            return
+        sig_map = ow.compare_signature_tag_map(
+            self._compare_orig_entries, self._compare_df_entries
+        )
+        self._compare_apply_signature_tags(self.tree_compare_orig, sig_map)
+        self._compare_apply_signature_tags(self.tree_compare_df, sig_map)
+        self._compare_fill_tree(
+            self.tree_compare_orig,
+            self._compare_orig_entries,
+            self._compare_orig_by_iid,
+            "o",
+            sig_map,
+        )
+        self._compare_fill_tree(
+            self.tree_compare_df,
+            self._compare_df_entries,
+            self._compare_df_by_iid,
+            "d",
+            sig_map,
+            match_signature=self._compare_selected_orig_sig,
+        )
+
+    def _compare_start_probe(self, generation: int) -> None:
+        entries = list(self._compare_orig_entries) + list(self._compare_df_entries)
+        if not entries:
+            return
+        if not shutil.which("ffprobe"):
+            self._log(self.tr("log.compare_probe_no_ffprobe"))
+            return
+
+        def work() -> None:
+            total = len(entries)
+            for i, entry in enumerate(entries, 1):
+                if generation != self._compare_probe_generation:
+                    return
+                ow.enrich_compare_entry_probe(entry)
+                if i % 3 == 0 or i == total:
+                    cur, tot, gen = i, total, generation
+                    self.root.after(0, lambda: self._compare_probe_progress(gen, cur, tot))
+            gen = generation
+            self.root.after(0, lambda: self._compare_probe_done(gen))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _compare_probe_progress(self, generation: int, current: int, total: int) -> None:
+        if generation != self._compare_probe_generation:
+            return
+        self._log(self.tr("log.compare_probe_progress", cur=current, tot=total))
+
+    def _compare_probe_done(self, generation: int) -> None:
+        if generation != self._compare_probe_generation:
+            return
+        self._compare_rebuild_trees()
+        self._log(self.tr("log.compare_probe_done"))
+
+    def _compare_scan_lists(self) -> None:
+        src_root = Path(self.var_compare_source_dir.get().strip())
+        df_root = Path(self.var_compare_deepfake_dir.get().strip())
+        if not src_root.is_dir() or not df_root.is_dir():
+            messagebox.showerror(self.tr("err.input"), self.tr("err.compare_scan_dirs"))
+            return
+        self._compare_probe_generation += 1
+        generation = self._compare_probe_generation
+        rec = self.var_compare_recursive.get()
+        self._compare_orig_entries = ow.scan_compare_folder(src_root, rec)
+        self._compare_df_entries = ow.scan_compare_folder(df_root, rec)
+        self._compare_selected_orig_sig = None
+        self._compare_rebuild_trees()
+        self._log(
+            self.tr(
+                "log.compare_scan",
+                no=len(self._compare_orig_entries),
+                nd=len(self._compare_df_entries),
+            )
+        )
+        self._compare_start_probe(generation)
+        self._save()
+
+    def _compare_tree_file_paths(self, tree: ttk.Treeview, by_iid: Dict[str, Path]) -> List[Path]:
+        out: List[Path] = []
+        for iid in tree.selection():
+            if iid.startswith("grp_"):
+                continue
+            p = by_iid.get(iid)
+            if p is not None:
+                out.append(p)
+        return out
+
+    def _compare_iid_for_path(self, by_iid: Dict[str, Path], path: Path) -> Optional[str]:
+        for iid, p in by_iid.items():
+            if ow.compare_paths_equal(p, path):
+                return iid
+        return None
+
+    def _compare_single_selected_path(
+        self, tree: ttk.Treeview, by_iid: Dict[str, Path]
+    ) -> Optional[Path]:
+        paths = self._compare_tree_file_paths(tree, by_iid)
+        return paths[0] if len(paths) == 1 else None
+
+    def _compare_apply_tree_selection(self, tree: ttk.Treeview, iid: str) -> bool:
+        if not iid or not tree.exists(iid):
+            return False
+        self._compare_suppress_tree_select = True
+        try:
+            cur = tree.selection()
+            if cur:
+                tree.selection_remove(*cur)
+            parent = tree.parent(iid)
+            while parent:
+                tree.item(parent, open=True)
+                parent = tree.parent(parent)
+            tree.selection_set(iid)
+            tree.focus(iid)
+            tree.see(iid)
+            tree.update_idletasks()
+        except tk.TclError:
+            return False
+        finally:
+            self._compare_suppress_tree_select = False
+        return True
+
+    def _compare_scroll_df_to_path(self, path: Path, *, ranked_count: int = 1) -> None:
+        iid = self._compare_iid_for_path(self._compare_df_by_iid, path)
+        if iid is None:
+            self._log(self.tr("log.compare_jump_none", name=path.name))
+            return
+        if self._compare_apply_tree_selection(self.tree_compare_df, iid):
+            self.var_deepfake.set(str(path))
+            if ranked_count > 1:
+                self._log(
+                    self.tr(
+                        "log.compare_jump_one_more",
+                        name=path.name,
+                        more=ranked_count - 1,
+                    )
+                )
+        else:
+            self._log(self.tr("log.compare_jump_none", name=path.name))
+
+    def _compare_refresh_df_tree(self) -> None:
+        if not getattr(self, "tree_compare_df", None):
+            return
+        sig_map = ow.compare_signature_tag_map(
+            self._compare_orig_entries, self._compare_df_entries
+        )
+        self._compare_apply_signature_tags(self.tree_compare_df, sig_map)
+        self._compare_fill_tree(
+            self.tree_compare_df,
+            self._compare_df_entries,
+            self._compare_df_by_iid,
+            "d",
+            sig_map,
+            match_signature=self._compare_selected_orig_sig,
+        )
+
+    def _compare_on_orig_select(self, evt: Optional[tk.Event] = None) -> None:
+        if self._compare_suppress_tree_select:
+            return
+        orig_path = self._compare_resolve_orig_path(evt)
+        if orig_path is None:
+            return
+        aid = self._compare_orig_select_after
+        if aid:
+            try:
+                self.root.after_cancel(aid)
+            except tk.TclError:
+                pass
+        captured = orig_path
+        self._compare_orig_select_after = self.root.after(
+            80, lambda p=captured: self._compare_do_orig_select(p)
+        )
+
+    def _compare_do_orig_select(self, orig_path: Path) -> None:
+        self._compare_orig_select_after = None
+        if self._compare_suppress_tree_select:
+            return
+        self.var_source.set(str(orig_path))
+        entry = self._compare_entry_for_path(orig_path, self._compare_orig_entries)
+        if entry is None:
+            self._compare_selected_orig_sig = None
+            self._compare_refresh_df_tree()
+            self._log(self.tr("log.compare_jump_entry", name=orig_path.name))
+            return
+        self._compare_selected_orig_sig = ow.compare_match_key(entry)
+        pattern = self.var_pattern.get().strip() or "YYMMDDHHmmSS"
+        ranked = ow.compare_rank_deepfakes_for_original(
+            entry, self._compare_df_entries, pattern
+        )
+        self._compare_resort_df_hint(orig_path)
+        self._compare_refresh_df_tree()
+        if not entry.probe_ok or entry.duration_sec is None:
+            self._log(self.tr("log.compare_jump_no_meta", name=orig_path.name))
+            return
+        if not ranked:
+            key = ow.compare_match_key(entry) or "?"
+            probed = sum(1 for e in self._compare_df_entries if e.probe_ok)
+            self._log(
+                self.tr(
+                    "log.compare_jump_none_detail",
+                    name=orig_path.name,
+                    match_key=key,
+                    nd=len(self._compare_df_entries),
+                    probed=probed,
+                )
+            )
+            return
+        best = ranked[0]
+        self._compare_scroll_df_to_path(best.path, ranked_count=len(ranked))
+
+    def _compare_on_df_select(self, _evt: Optional[tk.Event] = None) -> None:
+        paths = self._compare_tree_file_paths(self.tree_compare_df, self._compare_df_by_iid)
+        if paths:
+            self.var_deepfake.set(str(paths[0]))
+
+    def _compare_resort_df_hint(self, orig: Optional[Path]) -> None:
+        """Deepfake-Liste: Signatur-Treffer und Muster-Token nach oben (nur Anzeige)."""
+        if orig is None or not self._compare_df_entries:
+            return
+        sort_key = self.var_compare_sort.get().strip() or "date_desc"
+        orig_entry = self._compare_entry_for_path(orig, self._compare_orig_entries)
+        orig_sig = ow.compare_match_key(orig_entry) if orig_entry is not None else None
+        pattern = self.var_pattern.get().strip() or "YYMMDDHHmmSS"
+        token = ow.extract_pattern_match(orig.stem, pattern)
+
+        def _partition(
+            entries: List[ow.CompareFileEntry], pred: Callable[[ow.CompareFileEntry], bool]
+        ) -> List[ow.CompareFileEntry]:
+            hits = [e for e in entries if pred(e)]
+            rest = [e for e in entries if not pred(e)]
+            return ow.sort_compare_entries(hits, sort_key) + ow.sort_compare_entries(rest, sort_key)
+
+        ordered = list(self._compare_df_entries)
+        if orig_sig:
+            ordered = _partition(ordered, lambda e: ow.compare_match_key(e) == orig_sig)
+        if token:
+            ordered = _partition(ordered, lambda e: token in e.path.stem)
+        self._compare_df_entries = ordered
+
+    def _prepare_compare_patched_ini(self) -> Optional[str]:
         root_dir = app_dir()
-        src = self.var_source.get().strip()
-        df = self.var_deepfake.get().strip()
-        export_dir = self.var_compare_export.get().strip()
         if not ow.compare_script_path().is_file():
             messagebox.showerror(self.tr("err.input"), self.tr("err.compare_missing"))
-            return
+            return None
         ini_path = root_dir / "settings.ini"
         if not ini_path.is_file():
             messagebox.showerror(self.tr("err.input"), self.tr("err.ini_missing"))
-            return
-        if not src or not Path(src).is_file():
-            messagebox.showerror(self.tr("err.input"), self.tr("err.pick_orig"))
-            return
-        if not df or not Path(df).is_file():
-            messagebox.showerror(self.tr("err.input"), self.tr("err.pick_df"))
-            return
+            return None
+        export_dir = self.var_compare_export.get().strip()
         try:
             buf = float(self.var_buffer.get().replace(",", "."))
             noise = int(self.var_noise.get())
@@ -1419,13 +2028,11 @@ class OxcoApp:
             )
         except ValueError:
             messagebox.showerror(self.tr("err.input"), self.tr("err.numbers"))
-            return
-
+            return None
         if export_dir:
             Path(export_dir).mkdir(parents=True, exist_ok=True)
-
         base_ini = ini_path.read_text(encoding="utf-8", errors="replace")
-        patched = ow.apply_compare_overrides(
+        return ow.apply_compare_overrides(
             base_ini,
             final_export_dir=export_dir,
             language=self.var_ui_lang.get().strip() or "de",
@@ -1445,42 +2052,31 @@ class OxcoApp:
             ffmpeg_encoder=ow.br_codec_to_compare_ffmpeg_encoder(self.var_br_codec.get()),
         )
 
-        self._compare_user_stopped = False
-        self._compare_busy = True
-        self.btn_compare.configure(state="disabled")
-        self.btn_compare_retry.configure(state="disabled")
-        self.btn_compare_stop.configure(state="normal")
-        if retry_export_only:
-            self._log(self.tr("log.compare_retry_export"))
-        self._log(self.tr("log.compare_start"))
+    def _compare_set_busy_ui(self, busy: bool) -> None:
+        self._compare_busy = busy
+        state = "disabled" if busy else "normal"
+        self.btn_compare.configure(state=state)
+        self.btn_compare_batch.configure(state=state)
+        self.btn_compare_stop.configure(state="normal" if busy else "disabled")
+        if not busy:
+            self.btn_compare_retry.configure(state="disabled")
 
+    def _launch_compare_job(
+        self,
+        src: str,
+        df: str,
+        patched: str,
+        *,
+        retry_export_only: bool = False,
+    ) -> None:
         def log_line(s: str) -> None:
-            self.root.after(0, lambda: self._log(s))
+            self.root.after(0, lambda m=s: self._log(m))
 
         def reg_proc(p: Optional[Any]) -> None:
             self.root.after(0, lambda pr=p: setattr(self, "_compare_proc", pr))
 
         def done(rc: int, err: Optional[str]) -> None:
-            def finish() -> None:
-                self._compare_busy = False
-                self._compare_proc = None
-                self.btn_compare.configure(state="normal")
-                self.btn_compare_stop.configure(state="disabled")
-                stopped = self._compare_user_stopped
-                if stopped:
-                    self._log(self.tr("log.compare_stopped"))
-                    self._compare_user_stopped = False
-                elif err:
-                    self._log(self.tr("log.compare_err", err=err))
-                if (not stopped) and (not err) and rc == ow.COMPARE_EXIT_PARTIAL_EXPORT:
-                    self._log(self.tr("log.compare_partial"))
-                    self.btn_compare_retry.configure(state="normal")
-                else:
-                    self.btn_compare_retry.configure(state="disabled")
-                self._log(self.tr("log.compare_end", rc=rc))
-                self._save()
-
-            self.root.after(0, finish)
+            self.root.after(0, lambda: self._compare_job_done(rc, err))
 
         ow.run_compare_subprocess(
             src,
@@ -1490,6 +2086,132 @@ class OxcoApp:
             done,
             register_proc=reg_proc,
             retry_export_only=retry_export_only,
+        )
+
+    def _compare_job_done(self, rc: int, err: Optional[str]) -> None:
+        stopped = self._compare_user_stopped
+        if self._compare_batch_mode and not stopped and err is None and rc == ow.COMPARE_EXIT_OK:
+            if self._compare_batch_index + 1 < len(self._compare_batch_queue):
+                self._compare_batch_index += 1
+                src, df = self._compare_batch_queue[self._compare_batch_index]
+                self._log(
+                    self.tr(
+                        "log.compare_batch_job",
+                        cur=self._compare_batch_index + 1,
+                        tot=len(self._compare_batch_queue),
+                        df=Path(df).name,
+                    )
+                )
+                assert self._compare_patched_ini is not None
+                self._launch_compare_job(src, df, self._compare_patched_ini)
+                return
+            self._log(self.tr("log.compare_batch_done"))
+            self._compare_batch_mode = False
+
+        if self._compare_batch_mode and not stopped and (err or rc != ow.COMPARE_EXIT_OK):
+            self._log(self.tr("log.compare_batch_stopped", rc=rc))
+            self._compare_batch_mode = False
+
+        self._compare_proc = None
+        self._compare_set_busy_ui(False)
+        if stopped:
+            self._log(self.tr("log.compare_stopped"))
+            self._compare_user_stopped = False
+            self._compare_batch_mode = False
+        elif err:
+            self._log(self.tr("log.compare_err", err=err))
+        elif rc == ow.COMPARE_EXIT_PARTIAL_EXPORT:
+            self._log(self.tr("log.compare_partial"))
+            self.btn_compare_retry.configure(state="normal")
+        self._log(self.tr("log.compare_end", rc=rc))
+        self._save()
+
+    def _compare_build_job_queue(self) -> tuple[Optional[List[tuple[str, str]]], Optional[str]]:
+        """Warteschlange aus Baumauswahl (bevorzugt) oder Pfadfeldern."""
+        orig_paths = self._compare_tree_file_paths(
+            self.tree_compare_orig, self._compare_orig_by_iid
+        )
+        df_paths = self._compare_tree_file_paths(self.tree_compare_df, self._compare_df_by_iid)
+
+        src: Optional[str] = None
+        if len(orig_paths) > 1:
+            return None, "err.compare_pick_orig_tree"
+        if len(orig_paths) == 1:
+            src = str(orig_paths[0])
+        else:
+            s = self.var_source.get().strip()
+            if s and Path(s).is_file():
+                src = s
+
+        dfs: List[str] = []
+        if df_paths:
+            dfs = [str(p) for p in df_paths]
+        else:
+            d = self.var_deepfake.get().strip()
+            if d and Path(d).is_file():
+                dfs = [d]
+
+        if not src:
+            return None, "err.pick_orig"
+        if not dfs:
+            return None, "err.pick_df"
+        return [(src, df) for df in dfs], None
+
+    def _start_compare_jobs(
+        self,
+        queue: List[tuple[str, str]],
+        *,
+        retry_export_only: bool = False,
+        batch: bool = False,
+    ) -> None:
+        if not queue:
+            return
+        if self._compare_busy:
+            messagebox.showinfo(self.tr("info.note"), self.tr("info.compare_busy"))
+            return
+        patched = self._prepare_compare_patched_ini()
+        if patched is None:
+            return
+        self._compare_patched_ini = patched
+        self._compare_user_stopped = False
+        self._compare_batch_mode = batch and len(queue) > 1
+        self._compare_batch_queue = list(queue)
+        self._compare_batch_index = 0
+        self._compare_set_busy_ui(True)
+        if self._compare_batch_mode:
+            self._log(self.tr("log.compare_batch_start", n=len(queue)))
+        elif retry_export_only:
+            self._log(self.tr("log.compare_retry_export"))
+        else:
+            self._log(self.tr("log.compare_start"))
+        src, df = queue[0]
+        if self._compare_batch_mode:
+            self._log(
+                self.tr(
+                    "log.compare_batch_job",
+                    cur=1,
+                    tot=len(queue),
+                    df=Path(df).name,
+                )
+            )
+        self._launch_compare_job(src, df, patched, retry_export_only=retry_export_only)
+
+    def _run_compare_batch(self) -> None:
+        self._run_compare()
+
+    def _run_compare(self, *, retry_export_only: bool = False) -> None:
+        if self._compare_busy:
+            messagebox.showinfo(self.tr("info.note"), self.tr("info.compare_busy"))
+            return
+        queue, err_key = self._compare_build_job_queue()
+        if err_key or not queue:
+            messagebox.showerror(self.tr("err.input"), self.tr(err_key or "err.pick_orig"))
+            return
+        src, df = queue[0]
+        self.var_source.set(src)
+        self.var_deepfake.set(df)
+        self._start_compare_jobs(
+            queue, retry_export_only=retry_export_only, batch=len(queue) > 1
         )
 
     def _compare_stop(self) -> None:
@@ -1649,8 +2371,27 @@ class OxcoApp:
         self._tagger_scan_paths.extend(files)
         for i, p in enumerate(files):
             self.tree_tagger.insert("", tk.END, iid=str(i), values=(p.name,))
+        if self._tagger_preview is not None:
+            self._tagger_preview.load_path(None)
         if log_count and files:
             self._log(self.tr("log.tagger_list", n=len(files)))
+
+    def _on_tagger_tree_select(self, _event: Optional[tk.Event] = None) -> None:
+        if self._tagger_preview is None:
+            return
+        sel = self.tree_tagger.selection()
+        if not sel:
+            self._tagger_preview.load_path(None)
+            return
+        indices = sorted({int(iid) for iid in sel if str(iid).isdigit()})
+        if not indices:
+            self._tagger_preview.load_path(None)
+            return
+        idx = indices[0]
+        if 0 <= idx < len(self._tagger_scan_paths):
+            self._tagger_preview.load_path(self._tagger_scan_paths[idx])
+        else:
+            self._tagger_preview.load_path(None)
 
     def _tagger_resolved_only_files(self) -> Optional[List[Path]]:
         if getattr(self, "tree_tagger", None) is None:
@@ -1753,6 +2494,16 @@ class OxcoApp:
         self._tagger_refresh_list(log_count=False)
         self._save()
 
+    def _tagger_filter_settings(self) -> tuple[float, int, int, int]:
+        try:
+            buf = float(self.var_buffer.get().replace(",", "."))
+            noise = int(self.var_noise.get())
+            pix = int(self.var_pixel.get())
+            pix_max = max(0, int((self.var_pixel_max.get().strip() or "0")))
+        except ValueError:
+            buf, noise, pix, pix_max = 2.0, 15, 200, 0
+        return buf, noise, pix, pix_max
+
     def _run_tagger(self) -> None:
         inp = Path(self.var_tagger_in.get().strip())
         outp = Path(self.var_tagger_out.get().strip())
@@ -1763,6 +2514,8 @@ class OxcoApp:
         if only is not None and len(only) == 0:
             messagebox.showerror(self.tr("err.input"), self.tr("err.tagger_sel_invalid"))
             return
+        if self._tagger_preview is not None:
+            self._tagger_preview.release_file()
         outp.mkdir(parents=True, exist_ok=True)
 
         def log(s: str) -> None:
@@ -1771,6 +2524,9 @@ class OxcoApp:
         lang = (self.var_ui_lang.get().strip() or "de").lower()
         if lang not in ("de", "en"):
             lang = "de"
+
+        buf, noise, pix, pix_max = self._tagger_filter_settings()
+        br_suffix = self.var_br_suffix.get().strip() or "_bitrate"
 
         def work() -> None:
             ok, sk = ow.tagger_process_folder(
@@ -1785,6 +2541,11 @@ class OxcoApp:
                 log=log,
                 only_files=only,
                 ui_lang=lang,
+                filter_buffer_seconds=buf,
+                filter_noise_threshold=noise,
+                filter_pixel_threshold=pix,
+                filter_pixel_max_threshold=pix_max,
+                bitrate_output_suffix=br_suffix,
             )
             self.root.after(0, lambda: self._tagger_done(ok, sk))
 

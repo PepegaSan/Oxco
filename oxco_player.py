@@ -727,3 +727,246 @@ class OxcoVideoPreview(ttk.Frame):
                 pass
             self._auto_load_after = None
         self._release_caps()
+
+
+class OxcoTaggerPreview(ttk.Frame):
+    """Kleine Einzelvideo-Vorschau im Autotagger — Person im Clip erkennen."""
+
+    CANVAS_W = 320
+    CANVAS_H = 180
+
+    def __init__(self, parent: tk.Misc, host_app: Optional[Any] = None, **kwargs: Any) -> None:
+        super().__init__(parent, **kwargs)
+        self._host = host_app
+        self._cap: Any = None
+        self._photo: Optional[ImageTk.PhotoImage] = None
+        self._path: Optional[Path] = None
+        self._frame_index = 0
+        self._total = 0
+        self._playing = False
+        self._updating_scale = False
+        self._last_tick = 0.0
+
+        self.columnconfigure(0, weight=1)
+
+        self._lf = ttk.LabelFrame(self, text=self._t("flow.tagger_preview"))
+        self._lf.grid(row=0, column=0, sticky="nsew")
+        self._lf.columnconfigure(0, weight=1)
+
+        self.lbl_name = ttk.Label(self._lf, text="", wraplength=self.CANVAS_W)
+        self.lbl_name.grid(row=0, column=0, sticky="w", padx=4, pady=(4, 2))
+
+        self.canvas = tk.Canvas(
+            self._lf, width=self.CANVAS_W, height=self.CANVAS_H, bg="#1a1a1a", highlightthickness=0
+        )
+        self.canvas.grid(row=1, column=0, sticky="nsew", padx=4, pady=2)
+
+        ctl = ttk.Frame(self._lf)
+        ctl.grid(row=2, column=0, sticky="ew", padx=4, pady=2)
+        self.btn_play = ttk.Button(
+            ctl, text=self._t("preview.play"), command=self._toggle_play, state="disabled", width=8
+        )
+        self.btn_play.pack(side="left")
+        self.lbl_frame = ttk.Label(ctl, text="")
+        self.lbl_frame.pack(side="right")
+
+        self.scale = ttk.Scale(self._lf, from_=0, to=1, orient="horizontal", command=self._on_scale)
+        self.scale.grid(row=3, column=0, sticky="ew", padx=4, pady=(2, 4))
+        self.scale.configure(state="disabled")
+
+        self._hint = ttk.Label(
+            self._lf,
+            text=self._t("flow.tagger_preview_hint"),
+            foreground="gray",
+            wraplength=self.CANVAS_W,
+        )
+        self._hint.grid(row=4, column=0, sticky="w", padx=4, pady=(0, 4))
+
+        self._show_placeholder()
+
+    def _t(self, key: str, **kwargs: Any) -> str:
+        if self._host is not None and hasattr(self._host, "tr"):
+            return self._host.tr(key, **kwargs)
+        return key
+
+    def apply_i18n(self) -> None:
+        self._lf.configure(text=self._t("flow.tagger_preview"))
+        self._hint.configure(text=self._t("flow.tagger_preview_hint"))
+        self.btn_play.configure(text=self._t("preview.pause") if self._playing else self._t("preview.play"))
+        if self._path is None:
+            self._show_placeholder()
+
+    def load_path(self, path: Optional[Path]) -> None:
+        self._stop_playback()
+        self._release_cap()
+        self._path = None
+        if path is None or not path.is_file():
+            self._show_placeholder()
+            return
+
+        self._path = path
+        self.lbl_name.configure(text=path.name)
+        self._total = self._probe_frame_count(path)
+        if self._total <= 0:
+            self._path = None
+            self._show_placeholder(self._t("preview.err_open_a"))
+            return
+
+        last = max(0, self._total - 1)
+        self._frame_index = min(last, max(0, self._total // 4))
+        self._updating_scale = True
+        try:
+            self.scale.configure(to=max(1, last), state="normal")
+            self.scale.set(self._frame_index)
+        finally:
+            self._updating_scale = False
+        self.btn_play.configure(state="normal", text=self._t("preview.play"))
+        self._render_frame()
+
+    def release_file(self) -> None:
+        """Datei-Handle freigeben (Windows-Sperre), letztes Bild bleibt sichtbar."""
+        self._stop_playback()
+        self._release_cap()
+        self._path = None
+        self.scale.configure(state="disabled")
+        self.btn_play.configure(state="disabled", text=self._t("preview.play"))
+
+    def shutdown(self) -> None:
+        self._stop_playback()
+        self._release_cap()
+        self._path = None
+
+    def _stop_playback(self) -> None:
+        self._playing = False
+
+    def _release_cap(self) -> None:
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+    def _probe_frame_count(self, path: Path) -> int:
+        cap = cv2.VideoCapture(str(path))
+        try:
+            if not cap.isOpened():
+                return 0
+            return int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        finally:
+            cap.release()
+
+    def _read_frame_bgr(self, path: Path, frame_index: int) -> Optional[np.ndarray]:
+        cap = cv2.VideoCapture(str(path))
+        try:
+            if not cap.isOpened():
+                return None
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return None
+            return _to_bgr(frame)
+        finally:
+            cap.release()
+
+    def _show_placeholder(self, msg: Optional[str] = None) -> None:
+        self._release_cap()
+        self._path = None
+        self.canvas.delete("all")
+        self._photo = None
+        text = msg or self._t("flow.tagger_preview_no_file")
+        self.lbl_name.configure(text="")
+        self.lbl_frame.configure(text="")
+        self.scale.configure(state="disabled")
+        self.btn_play.configure(state="disabled", text=self._t("preview.play"))
+        cw, ch = self.CANVAS_W, self.CANVAS_H
+        self.canvas.create_text(cw // 2, ch // 2, text=text, fill="#888888", width=cw - 20)
+
+    def _toggle_play(self) -> None:
+        if self._path is None:
+            return
+        self._playing = not self._playing
+        self.btn_play.configure(text=self._t("preview.pause") if self._playing else self._t("preview.play"))
+        if self._playing:
+            self._release_cap()
+            self._cap = cv2.VideoCapture(str(self._path))
+            if not self._cap.isOpened():
+                self._release_cap()
+                self._playing = False
+                self.btn_play.configure(text=self._t("preview.play"))
+                return
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, self._frame_index)
+            self._last_tick = time.time()
+            self._tick()
+        else:
+            self._release_cap()
+
+    def _tick(self) -> None:
+        if not self._playing or self._cap is None or self._path is None:
+            return
+        min_interval = 1.0 / 12.0
+        elapsed = time.time() - self._last_tick
+        if elapsed < min_interval:
+            self.after(max(1, int((min_interval - elapsed) * 1000)), self._tick)
+            return
+        self._last_tick = time.time()
+
+        ok, frame = self._cap.read()
+        if not ok or frame is None:
+            self._playing = False
+            self._release_cap()
+            self.btn_play.configure(text=self._t("preview.play"))
+            return
+
+        if self._total > 0:
+            self._frame_index = min(self._frame_index + 1, self._total - 1)
+
+        self._updating_scale = True
+        try:
+            self.scale.set(self._frame_index)
+        finally:
+            self._updating_scale = False
+
+        bgr = _to_bgr(frame)
+        if bgr is not None:
+            self._paint_frame(bgr)
+        if self._frame_index >= max(0, self._total - 1):
+            self._playing = False
+            self._release_cap()
+            self.btn_play.configure(text=self._t("preview.play"))
+            return
+        self.after(1, self._tick)
+
+    def _on_scale(self, val: str) -> None:
+        if self._updating_scale or self._path is None:
+            return
+        self._frame_index = int(float(val))
+        if self._playing and self._cap is not None:
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, self._frame_index)
+            return
+        self._render_frame()
+
+    def _paint_frame(self, bgr: np.ndarray) -> None:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        fh, fw = rgb.shape[:2]
+        scale = min(self.CANVAS_W / fw, self.CANVAS_H / fh, 1.0)
+        nw = max(1, int(fw * scale))
+        nh = max(1, int(fh * scale))
+        if nw != fw or nh != fh:
+            rgb = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+
+        ix0 = max(0, (self.CANVAS_W - nw) // 2)
+        iy0 = max(0, (self.CANVAS_H - nh) // 2)
+        self.canvas.delete("all")
+        self._photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
+        self.canvas.create_image(ix0, iy0, anchor=tk.NW, image=self._photo)
+        last = max(0, self._total - 1)
+        self.lbl_frame.configure(text=self._t("preview.frame_info", i=self._frame_index, last=last))
+
+    def _render_frame(self) -> None:
+        if self._path is None:
+            return
+        if self._playing and self._cap is not None:
+            return
+        bgr = self._read_frame_bgr(self._path, self._frame_index)
+        if bgr is None:
+            self._show_placeholder(self._t("preview.err_open_a"))
+            return
+        self._paint_frame(bgr)

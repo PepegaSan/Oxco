@@ -33,6 +33,52 @@ DE: Dict[str, str] = {
     "flow.compare_stop": "Stoppen",
     "flow.compare_retry": "Erneut",
     "flow.compare_more_filters": "Weitere Schwellen: Tab „Filter“.",
+    "flow.compare_src_dir": "Original-Ordner (Scan)",
+    "flow.compare_df_dir": "Deepfake-Ordner (Scan)",
+    "flow.compare_load_lists": "Listen laden",
+    "flow.compare_recursive": "Unterordner einbeziehen",
+    "flow.compare_sort": "Sortieren",
+    "flow.compare_group": "Gruppieren",
+    "flow.compare_sort.date_desc": "Datum (neueste zuerst)",
+    "flow.compare_sort.date_asc": "Datum (älteste zuerst)",
+    "flow.compare_sort.size_desc": "Größe (größte zuerst)",
+    "flow.compare_sort.size_asc": "Größe (kleinste zuerst)",
+    "flow.compare_sort.name_asc": "Name (A–Z)",
+    "flow.compare_sort.name_desc": "Name (Z–A)",
+    "flow.compare_sort.duration_desc": "Länge (längste zuerst)",
+    "flow.compare_sort.duration_asc": "Länge (kürzeste zuerst)",
+    "flow.compare_group.none": "Keine",
+    "flow.compare_group.folder": "Unterordner",
+    "flow.compare_group.date": "Datum",
+    "flow.compare_group.letter": "Anfangsbuchstabe",
+    "flow.compare_group.duration": "Video-Länge",
+    "flow.compare_tree_name": "Datei",
+    "flow.compare_tree_rel": "Pfad",
+    "flow.compare_tree_size": "Größe",
+    "flow.compare_tree_date": "Geändert",
+    "flow.compare_tree_duration": "Länge",
+    "flow.compare_tree_res": "Auflösung",
+    "flow.compare_color_hint": "Gleiche Farbe = gleiche Länge und Auflösung (ffprobe, beide Listen).",
+    "flow.compare_run_batch": "Compare (Auswahl)",
+    "flow.compare_batch_hint": "Links genau ein Original, rechts ein oder mehrere Deepfakes markieren (Strg+Klick) — Compare führt alle nacheinander aus.",
+    "err.compare_scan_dirs": "Original- und Deepfake-Ordner setzen (gültige Verzeichnisse).",
+    "err.compare_pick_orig_tree": "In der Original-Liste genau eine Datei markieren.",
+    "err.compare_pick_df_tree": "In der Deepfake-Liste mindestens eine Datei markieren.",
+    "log.compare_scan": "Compare-Listen: {no} Original, {nd} Deepfake.",
+    "log.compare_probe_progress": "Compare-Metadaten: {cur}/{tot} …",
+    "log.compare_probe_done": "Compare-Metadaten fertig — Farben nach Länge/Auflösung.",
+    "log.compare_probe_no_ffprobe": "ffprobe nicht gefunden — keine Länge/Auflösung/Farben in Compare-Listen.",
+    "log.compare_jump_many": "Deepfake(s) mit gleicher Länge/Auflösung markiert: {n}",
+    "log.compare_jump_one": "Deepfake markiert: {name}",
+    "log.compare_jump_one_more": "Deepfake markiert: {name} ({more} weitere mit gleicher Länge/Auflösung)",
+    "log.compare_jump_none": "Kein Deepfake mit gleicher Länge/Auflösung wie „{name}“.",
+    "log.compare_jump_none_detail": "Kein Deepfake für „{name}“ (Schlüssel: {match_key}, {nd} DF gesamt, {probed} mit Metadaten).",
+    "log.compare_jump_no_meta": "Original „{name}“: Länge/Auflösung unbekannt (Metadaten-Scan abwarten).",
+    "log.compare_jump_entry": "Original „{name}“ nicht in der Eintragsliste (Listen neu laden).",
+    "log.compare_batch_start": "— Compare-Warteschlange: {n} Deepfake(s) für ein Original —",
+    "log.compare_batch_job": "Compare {cur}/{tot}: {df}",
+    "log.compare_batch_stopped": "— Warteschlange abgebrochen (Fehler oder Stopp, Code {rc}) —",
+    "log.compare_batch_done": "— Compare-Warteschlange fertig —",
     "flow.step2": "2. Bitrate — Ordner scannen und transcodieren",
     "flow.tree.file": "Datei",
     "flow.tree.res": "Auflösung",
@@ -47,6 +93,9 @@ DE: Dict[str, str] = {
     "flow.profile": "Profilname (Fallback)",
     "flow.process": "Jetzt verarbeiten",
     "flow.tagger_tree_file": "Datei (.mp4)",
+    "flow.tagger_preview": "Vorschau",
+    "flow.tagger_preview_hint": "Datei markieren — Slider/Abspielen zum Erkennen der Person.",
+    "flow.tagger_preview_no_file": "Keine Datei gewählt.",
     "flow.tagger_refresh": "Liste laden",
     "flow.tagger_hint": "Keine Markierung: alle Dateien im Quellordner. Mit Markierung: nur die gewählten Zeilen.",
     "flow.ctx_move_to_tagger": "In Autotagger-Quellordner verschieben",
@@ -71,8 +120,9 @@ DE: Dict[str, str] = {
     "help.tag_route.title": "Tag-Verteilung",
     "help.tag_route.body": (
         "Quelle ist immer der Autotagger-Zielordner (Tab Pfade). Pro Zeile: Tag-Text und Zielordner.\n\n"
-        "Enthält der Dateiname den Tag als Text (Groß/Klein egal), wird die Datei dorthin verschoben. "
-        "Mehrere Regeln: die erste passende Zeile von oben gewinnt.\n\n"
+        "Bei Tags in eckigen Klammern (wie nach dem Autotagger) muss der Klammer-Inhalt **genau** passen — "
+        "[Julia] trifft nicht auf [Julia Berens]. Längere Tags haben zusätzlich Vorrang.\n\n"
+        "Ohne Klammern im Dateinamen: „Julia“ trifft nicht auf „Julia Berens“ (Wortgrenze).\n\n"
         "Ohne Treffer bleibt die Datei im Zielordner des Autotaggers."
     ),
     "filters.group_compare": "Compare — Analyse und Export",
@@ -212,12 +262,13 @@ DE: Dict[str, str] = {
     "help.ignore.body": "Dateien mit solchem Namensende werden nicht bearbeitet — z. B. wenn du Rohmaterial auslassen willst.",
     "help.drop.title": "Drop-Suffixe",
     "help.drop.body": (
-        "Teile am Ende des Dateinamens (ohne .mp4), die beim Umbenennen abgeschnitten werden — per Komma wie bei Keep.\n\n"
-        "Nur was du einträgst (oder per Regex trifft), wird entfernt. Steht im Namen z. B. eine andere Auflösung als in der Liste, "
-        "bleibt sie unverändert — außer du fasst sie mit ab.\n\n"
-        "Regex: Eintrag mit r: am Anfang, danach ein Python-kompatibles Muster; es gilt nur am Namensende "
-        "(Groß/Klein egal). Beispiel für gängige Pixelhöhen: r:_\\d{3,4}p trifft u. a. auf _1080p, _720p, _2160p zu.\n\n"
-        "Komma trennt nur Einträge — ein Komma im Regex vermeiden (z. B. Alternativen mit (?:a|b) nutzen)."
+        "Zusätzliche Teile am Ende des Dateinamens (ohne .mp4), die du selbst einträgst — per Komma wie bei Keep.\n\n"
+        "Automatisch (ohne Eintrag hier) entfernt Oxco beim Taggen u. a.:\n"
+        "• Compare-Schwellen-Suffix aus Tab „Filter“ (_b…_n…_p…, optional _m…)\n"
+        "• _DaVinci_Export\n"
+        "• das Bitrate-Ausgabe-Suffix aus Tab „Filter“ (z. B. _bitrate)\n"
+        "• andere _b/_n/_p-Kombinationen am Ende (ältere Compare-Läufe)\n\n"
+        "Regex: Eintrag mit r: am Anfang; nur am Namensende. Beispiel Auflösungen: r:_\\d{3,4}p"
     ),
     "help.pattern.title": "Muster im Dateinamen",
     "help.pattern.body": (
@@ -325,6 +376,52 @@ EN.update(
         "flow.compare_stop": "Stop",
         "flow.compare_retry": "Retry",
         "flow.compare_more_filters": "More thresholds: “Filter” tab.",
+        "flow.compare_src_dir": "Original folder (scan)",
+        "flow.compare_df_dir": "Deepfake folder (scan)",
+        "flow.compare_load_lists": "Load lists",
+        "flow.compare_recursive": "Include subfolders",
+        "flow.compare_sort": "Sort",
+        "flow.compare_group": "Group by",
+        "flow.compare_sort.date_desc": "Date (newest first)",
+        "flow.compare_sort.date_asc": "Date (oldest first)",
+        "flow.compare_sort.size_desc": "Size (largest first)",
+        "flow.compare_sort.size_asc": "Size (smallest first)",
+        "flow.compare_sort.name_asc": "Name (A–Z)",
+        "flow.compare_sort.name_desc": "Name (Z–A)",
+        "flow.compare_sort.duration_desc": "Duration (longest first)",
+        "flow.compare_sort.duration_asc": "Duration (shortest first)",
+        "flow.compare_group.none": "None",
+        "flow.compare_group.folder": "Subfolder",
+        "flow.compare_group.date": "Date",
+        "flow.compare_group.letter": "First letter",
+        "flow.compare_group.duration": "Video duration",
+        "flow.compare_tree_name": "File",
+        "flow.compare_tree_rel": "Path",
+        "flow.compare_tree_size": "Size",
+        "flow.compare_tree_date": "Modified",
+        "flow.compare_tree_duration": "Duration",
+        "flow.compare_tree_res": "Resolution",
+        "flow.compare_color_hint": "Same color = same duration and resolution (ffprobe, both lists).",
+        "flow.compare_run_batch": "Compare (selection)",
+        "flow.compare_batch_hint": "Exactly one original on the left, one or more deepfakes selected on the right (Ctrl+click) — Compare runs them sequentially.",
+        "err.compare_scan_dirs": "Set valid original and deepfake scan folders.",
+        "err.compare_pick_orig_tree": "Select exactly one file in the original list.",
+        "err.compare_pick_df_tree": "Select at least one file in the deepfake list.",
+        "log.compare_scan": "Compare lists: {no} original, {nd} deepfake.",
+        "log.compare_probe_progress": "Compare metadata: {cur}/{tot} …",
+        "log.compare_probe_done": "Compare metadata done — colors by duration/resolution.",
+        "log.compare_probe_no_ffprobe": "ffprobe not found — no duration/resolution/colors in compare lists.",
+        "log.compare_jump_many": "Deepfake(s) with same duration/resolution selected: {n}",
+        "log.compare_jump_one": "Deepfake selected: {name}",
+        "log.compare_jump_one_more": "Deepfake selected: {name} ({more} more with same duration/resolution)",
+        "log.compare_jump_none": "No deepfake with same duration/resolution as “{name}”.",
+        "log.compare_jump_none_detail": "No deepfake for “{name}” (key: {match_key}, {nd} DF total, {probed} with metadata).",
+        "log.compare_jump_no_meta": "Original “{name}”: duration/resolution unknown (wait for metadata scan).",
+        "log.compare_jump_entry": "Original “{name}” not in entry list (reload lists).",
+        "log.compare_batch_start": "— Compare queue: {n} deepfake(s) for one original —",
+        "log.compare_batch_job": "Compare {cur}/{tot}: {df}",
+        "log.compare_batch_stopped": "— Queue stopped (error, stop, or code {rc}) —",
+        "log.compare_batch_done": "— Compare queue finished —",
         "flow.step2": "2. Bitrate — scan folder and transcode",
         "flow.tree.file": "File",
         "flow.tree.res": "Resolution",
@@ -339,6 +436,9 @@ EN.update(
         "flow.profile": "Profile name (fallback)",
         "flow.process": "Process now",
         "flow.tagger_tree_file": "File (.mp4)",
+        "flow.tagger_preview": "Preview",
+        "flow.tagger_preview_hint": "Select a file — use the slider or play to see who is in the clip.",
+        "flow.tagger_preview_no_file": "No file selected.",
         "flow.tagger_refresh": "Load list",
         "flow.tagger_hint": "No selection: every .mp4 in the source folder. With selection: only the highlighted rows.",
         "flow.ctx_move_to_tagger": "Move to autotagger source folder",
@@ -363,8 +463,9 @@ EN.update(
         "help.tag_route.title": "Tag routing",
         "help.tag_route.body": (
             "Source is always the autotagger destination folder (Paths tab). Each row: tag text and destination folder.\n\n"
-            "If the filename contains the tag (case-insensitive), the file is moved there. "
-            "With multiple rules, the first matching row from the top wins.\n\n"
+            "With bracket tags (as after autotagger), the text inside the brackets must match **exactly** — "
+            "[Julia] does not match [Julia Berens]. Longer tags are tried first.\n\n"
+            "Without brackets in the filename, “Julia” does not match “Julia Berens” (word boundary).\n\n"
             "Files with no match stay in the autotagger destination folder."
         ),
         "filters.group_compare": "Compare — analysis and export",
@@ -501,12 +602,13 @@ EN.update(
         "help.ignore.body": "Files whose names end like this are skipped — e.g. to exclude raw material.",
         "help.drop.title": "Drop suffixes",
         "help.drop.body": (
-            "Trailing parts of the filename stem (before .mp4) to strip when renaming — comma-separated like Keep.\n\n"
-            "Only what you list (or what your regex matches at the end) is removed. If the file ends with a different tag "
-            "than any literal you listed, it stays — unless you cover it with a pattern.\n\n"
-            "Regex: start an entry with r: followed by a Python regex; it only matches at the end of the stem "
-            "(case-insensitive). Example for common heights: r:_\\d{3,4}p matches _1080p, _720p, _2160p, etc.\n\n"
-            "Commas split entries only — avoid a raw comma inside the regex (use alternation like (?:a|b))."
+            "Extra trailing parts of the filename stem (before .mp4) that you list here — comma-separated like Keep.\n\n"
+            "Removed automatically when tagging (no entry needed):\n"
+            "• Compare threshold suffix from the Filter tab (_b…_n…_p…, optional _m…)\n"
+            "• _DaVinci_Export\n"
+            "• the bitrate output suffix from the Filter tab (e.g. _bitrate)\n"
+            "• other _b/_n/_p combinations at the end (older Compare runs)\n\n"
+            "Regex: prefix r: ; end of stem only. Example resolutions: r:_\\d{3,4}p"
         ),
         "help.pattern.title": "Filename pattern",
         "help.pattern.body": (
