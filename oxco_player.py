@@ -9,7 +9,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
@@ -337,6 +337,8 @@ class OxcoVideoPreview(ttk.Frame):
         self.shutdown()
 
     def _on_host_paths_changed(self) -> None:
+        if self._host_app is not None and getattr(self._host_app, "_file_op_in_progress", False):
+            return
         if not self.var_link_paths.get():
             return
         self._sync_paths_from_host()
@@ -728,6 +730,37 @@ class OxcoVideoPreview(ttk.Frame):
             self._auto_load_after = None
         self._release_caps()
 
+    def release_caps_for_paths(self, paths: Sequence[Path]) -> None:
+        """Video-Handles freigeben, wenn Vorschau A/B betroffene Dateien geöffnet hat."""
+        if not paths:
+            return
+        targets: Set[str] = set()
+        for raw in paths:
+            try:
+                targets.add(str(raw.resolve()).casefold())
+            except OSError:
+                targets.add(str(raw).casefold())
+
+        def _hit(var: tk.StringVar) -> bool:
+            p = var.get().strip()
+            if not p:
+                return False
+            try:
+                return str(Path(p).resolve()).casefold() in targets
+            except OSError:
+                return p.casefold() in targets
+
+        if not (_hit(self.var_path_a) or _hit(self.var_path_b)):
+            return
+        self._playing = False
+        if self._auto_load_after is not None:
+            try:
+                self.after_cancel(self._auto_load_after)
+            except tk.TclError:
+                pass
+            self._auto_load_after = None
+        self._release_caps()
+
 
 class OxcoTaggerPreview(ttk.Frame):
     """Kleine Einzelvideo-Vorschau im Autotagger — Person im Clip erkennen."""
@@ -830,6 +863,24 @@ class OxcoTaggerPreview(ttk.Frame):
         self._path = None
         self.scale.configure(state="disabled")
         self.btn_play.configure(state="disabled", text=self._t("preview.play"))
+
+    def release_if_paths(self, paths: Sequence[Path]) -> None:
+        if self._path is None:
+            self._stop_playback()
+            self._release_cap()
+            return
+        targets: Set[str] = set()
+        for raw in paths:
+            try:
+                targets.add(str(raw.resolve()).casefold())
+            except OSError:
+                targets.add(str(raw).casefold())
+        try:
+            mine = str(self._path.resolve()).casefold()
+        except OSError:
+            mine = str(self._path).casefold()
+        if mine in targets:
+            self.release_file()
 
     def shutdown(self) -> None:
         self._stop_playback()

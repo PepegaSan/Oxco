@@ -1127,6 +1127,97 @@ def make_unique_path(path: Path) -> Path:
         counter += 1
 
 
+def _win_send_path_to_recycle_bin_shell(path: Path) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    p = str(path.resolve())
+    if not os.path.isfile(p):
+        return False
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", wintypes.WORD),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
+    FO_DELETE = 0x0003
+    FOF_ALLOWUNDO = 0x0040
+    FOF_NOCONFIRMATION = 0x0010
+
+    op = SHFILEOPSTRUCTW()
+    op.hwnd = 0
+    op.wFunc = FO_DELETE
+    op.pFrom = p + "\0\0"
+    op.pTo = None
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION
+    rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    return rc == 0 and not op.fAnyOperationsAborted and not path.is_file()
+
+
+def _win_send_path_to_recycle_bin_powershell(path: Path) -> bool:
+    p = str(path.resolve()).replace("'", "''")
+    script = (
+        "Add-Type -AssemblyName Microsoft.VisualBasic; "
+        f"[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{p}', "
+        "'OnlyErrorDialogs', 'SendToRecycleBin')"
+    )
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            creationflags=flags,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and not path.is_file()
+
+
+def _win_send_path_to_recycle_bin(path: Path) -> bool:
+    if _win_send_path_to_recycle_bin_shell(path):
+        return True
+    return _win_send_path_to_recycle_bin_powershell(path)
+
+
+def path_looks_file_locked(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with open(path, "r+b"):
+            pass
+        return False
+    except OSError as e:
+        if getattr(e, "winerror", None) == 32:
+            return True
+        return e.errno in (13, 16)
+
+
+def send_paths_to_recycle_bin(paths: Sequence[Path]) -> Tuple[List[Path], Optional[str]]:
+    """Dateien in den Papierkorb (Windows). Gibt gelöschte Pfade zurück."""
+    if sys.platform != "win32":
+        return [], "unsupported"
+    deleted: List[Path] = []
+    for raw in paths:
+        try:
+            p = raw.resolve()
+        except OSError:
+            continue
+        if not p.is_file():
+            continue
+        if _win_send_path_to_recycle_bin(p):
+            deleted.append(p)
+    return deleted, None
+
+
 def build_tagger_target_name(
     stem: str,
     tag: str,

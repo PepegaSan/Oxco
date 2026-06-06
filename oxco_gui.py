@@ -147,6 +147,7 @@ class OxcoApp:
         self._tag_route_win: Optional[tk.Toplevel] = None
         self._tag_route_row_vars: List[tuple[tk.StringVar, tk.StringVar]] = []
         self._tag_route_busy = False
+        self._file_op_in_progress = False
 
         # —— Variablen: Pfade ——
         # Compare-Export → Bitrate-Scan (wenn gekoppelt, siehe trace).
@@ -928,6 +929,8 @@ class OxcoApp:
         self.tree_compare_orig.bind("<<TreeviewSelect>>", self._compare_on_orig_select)
         self.tree_compare_orig.bind("<ButtonRelease-1>", self._compare_on_orig_select)
         self.tree_compare_df.bind("<<TreeviewSelect>>", self._compare_on_df_select)
+        self.tree_compare_df.bind("<Button-3>", self._compare_df_tree_context_menu)
+        self.tree_compare_df.bind("<Delete>", self._compare_df_on_delete_key)
         hint_color = ttk.Label(c, text=self.tr("flow.compare_color_hint"), foreground="gray", wraplength=640)
         hint_color.grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 2))
         self._i18n_labeled.append((hint_color, "flow.compare_color_hint"))
@@ -2326,6 +2329,168 @@ class OxcoApp:
                 ),
             )
 
+    def _move_paths_to_folder(self, sources: Sequence[Path], dest: Path) -> Set[Any]:
+        moved_res: Set[Any] = set()
+        if not dest.is_dir():
+            return moved_res
+        skipped_same = 0
+        aborted_error = False
+        file_sources = [p for p in sources if p.is_file()]
+        for src in file_sources:
+            dst = dest / src.name
+            if dst.resolve() == src.resolve():
+                skipped_same += 1
+                continue
+            if dst.exists():
+                dst = ow.make_unique_path(dst)
+            try:
+                shutil.move(str(src), str(dst))
+            except OSError as e:
+                aborted_error = True
+                if getattr(e, "winerror", None) == 32 or ow.path_looks_file_locked(src):
+                    messagebox.showerror(self.tr("err.input"), self.tr("err.file_in_use", name=src.name))
+                else:
+                    messagebox.showerror(self.tr("err.input"), str(e))
+                break
+            moved_res.add(src.resolve())
+        if not moved_res and not aborted_error and file_sources:
+            if skipped_same == len(file_sources):
+                messagebox.showinfo(self.tr("info.note"), self.tr("info.compare_already_in_folder"))
+            else:
+                messagebox.showinfo(self.tr("info.note"), self.tr("info.compare_nothing_moved"))
+        return moved_res
+
+    def _release_handles_for_file_ops(self, paths: Sequence[Path]) -> None:
+        if not paths:
+            return
+        self._file_op_in_progress = True
+        try:
+            if self._video_preview is not None:
+                release = getattr(self._video_preview, "release_caps_for_paths", None)
+                if callable(release):
+                    release(paths)
+                else:
+                    self._video_preview._playing = False
+                    if self._video_preview._auto_load_after is not None:
+                        try:
+                            self._video_preview.after_cancel(self._video_preview._auto_load_after)
+                        except tk.TclError:
+                            pass
+                        self._video_preview._auto_load_after = None
+                    self._video_preview._release_caps()
+            if self._tagger_preview is not None:
+                release_tg = getattr(self._tagger_preview, "release_if_paths", None)
+                if callable(release_tg):
+                    release_tg(paths)
+                else:
+                    self._tagger_preview.release_file()
+        finally:
+            self._file_op_in_progress = False
+
+    def _compare_df_paths_for_operation(self, paths: Optional[List[Path]] = None) -> List[Path]:
+        if paths is None:
+            paths = self._compare_tree_file_paths(self.tree_compare_df, self._compare_df_by_iid)
+        if not paths:
+            return []
+        self._release_handles_for_file_ops(paths)
+        return list(paths)
+
+    def _compare_df_tree_context_menu(self, event: tk.Event) -> None:
+        tree = self.tree_compare_df
+        row_id = tree.identify_row(event.y)
+        if not row_id or row_id.startswith("grp_"):
+            return
+        sel = tree.selection()
+        if not sel or row_id not in sel:
+            tree.selection_set(row_id)
+        menu_paths = list(self._compare_tree_file_paths(tree, self._compare_df_by_iid))
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label=self.tr("flow.ctx_move_to_bitrate"),
+            command=lambda p=menu_paths: self._compare_df_move_selection_to_bitrate_in(p),
+        )
+        menu.add_command(
+            label=self.tr("flow.ctx_move_to_tagger"),
+            command=lambda p=menu_paths: self._compare_df_move_selection_to_tagger_in(p),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label=self.tr("flow.ctx_recycle_bin"),
+            command=lambda p=menu_paths: self._compare_df_delete_selection_to_recycle(p),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _compare_df_remove_moved_from_list(self, moved_res: Set[Any]) -> None:
+        if not moved_res:
+            return
+        self._compare_df_entries = [
+            e for e in self._compare_df_entries if e.path.resolve() not in moved_res
+        ]
+        df = self.var_deepfake.get().strip()
+        if df:
+            try:
+                if Path(df).resolve() in moved_res:
+                    self.var_deepfake.set("")
+            except OSError:
+                pass
+        self._compare_refresh_df_tree()
+
+    def _compare_df_move_selection_to_bitrate_in(self, paths: Optional[List[Path]] = None) -> None:
+        dest = Path(self.var_bitrate_in.get().strip())
+        if not dest.is_dir():
+            messagebox.showerror(self.tr("err.input"), self.tr("err.bitrate_in_for_move"))
+            return
+        to_move = self._compare_df_paths_for_operation(paths)
+        if not to_move:
+            return
+        moved_res = self._move_paths_to_folder(to_move, dest)
+        for src in to_move:
+            if src.resolve() in moved_res:
+                self._log(self.tr("log.compare_move_bitrate", name=src.name))
+        self._compare_df_remove_moved_from_list(moved_res)
+
+    def _compare_df_move_selection_to_tagger_in(self, paths: Optional[List[Path]] = None) -> None:
+        dest = Path(self.var_tagger_in.get().strip())
+        if not dest.is_dir():
+            messagebox.showerror(self.tr("err.input"), self.tr("err.tagger_in_for_move"))
+            return
+        to_move = self._compare_df_paths_for_operation(paths)
+        if not to_move:
+            return
+        moved_res = self._move_paths_to_folder(to_move, dest)
+        for src in to_move:
+            if src.resolve() in moved_res:
+                self._log(self.tr("log.compare_move_tagger", name=src.name))
+        self._compare_df_remove_moved_from_list(moved_res)
+        self._tagger_refresh_list(log_count=False)
+
+    def _compare_df_on_delete_key(self, _event: tk.Event) -> str:
+        self._compare_df_delete_selection_to_recycle()
+        return "break"
+
+    def _compare_df_delete_selection_to_recycle(self, paths: Optional[List[Path]] = None) -> None:
+        to_del = self._compare_df_paths_for_operation(paths)
+        if not to_del:
+            return
+        deleted, err = ow.send_paths_to_recycle_bin(to_del)
+        if err == "unsupported":
+            messagebox.showerror(self.tr("err.input"), self.tr("err.recycle_bin_unsupported"))
+            return
+        if not deleted:
+            locked = next((p for p in to_del if ow.path_looks_file_locked(p)), None)
+            if locked is not None:
+                messagebox.showerror(self.tr("err.input"), self.tr("err.file_in_use", name=locked.name))
+            else:
+                messagebox.showerror(self.tr("err.input"), self.tr("err.recycle_bin_failed"))
+            return
+        deleted_res = {p.resolve() for p in deleted}
+        for p in deleted:
+            self._log(self.tr("log.compare_recycle", name=p.name))
+        self._compare_df_remove_moved_from_list(deleted_res)
+
     def _bitrate_tree_context_menu(self, event: tk.Event) -> None:
         row_id = self.tree.identify_row(event.y)
         if not row_id:
@@ -2361,22 +2526,10 @@ class OxcoApp:
                 to_move.append(self._bitrate_rows[i].path)
         if not to_move:
             return
-        moved_res: Set[Any] = set()
+        moved_res = self._move_paths_to_folder(to_move, tag_in)
         for src in to_move:
-            if not src.is_file():
-                continue
-            dst = tag_in / src.name
-            if dst.resolve() == src.resolve():
-                continue
-            if dst.exists():
-                dst = ow.make_unique_path(dst)
-            try:
-                shutil.move(str(src), str(dst))
-            except OSError as e:
-                messagebox.showerror(self.tr("err.input"), str(e))
-                break
-            moved_res.add(src.resolve())
-            self._log(self.tr("log.br_move_tagger", name=dst.name))
+            if src.resolve() in moved_res:
+                self._log(self.tr("log.br_move_tagger", name=src.name))
         self._bitrate_rows = [r for r in self._bitrate_rows if r.path.resolve() not in moved_res]
         self._bitrate_rebuild_tree_from_rows()
         self._tagger_refresh_list(log_count=False)
