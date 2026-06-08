@@ -1600,7 +1600,7 @@ class OxcoApp:
         return f"{n} B"
 
     def _fmt_mtime(self, mtime: float) -> str:
-        return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
 
     def _sync_compare_sort_combo_from_var(self) -> None:
         key = self.var_compare_sort.get().strip() or "date_desc"
@@ -1747,8 +1747,11 @@ class OxcoApp:
         by_iid.clear()
         sort_key = self.var_compare_sort.get().strip() or "date_desc"
         group_key = self.var_compare_group.get().strip() or "folder"
-        sorted_entries = ow.sort_compare_entries(entries, sort_key)
-        groups = ow.group_compare_entries(sorted_entries, group_key, sort_mode=sort_key)
+        pattern = self.var_pattern.get().strip() or "YYMMDDHHmmSS"
+        sorted_entries = ow.sort_compare_entries(entries, sort_key, pattern_text=pattern)
+        groups = ow.group_compare_entries(
+            sorted_entries, group_key, sort_mode=sort_key, pattern_text=pattern
+        )
         empty_vals = ("", "", "", "", "", "")
         file_idx = 0
         used_group_iids: Set[str] = set()
@@ -1780,7 +1783,7 @@ class OxcoApp:
                         ow.fmt_compare_duration(e.duration_sec),
                         ow.fmt_compare_resolution(e.width, e.height),
                         self._fmt_file_size(e.size),
-                        self._fmt_mtime(e.mtime),
+                        self._fmt_mtime(ow.compare_entry_sort_time(e, pattern)),
                     ),
                 }
                 if row_tags:
@@ -2019,7 +2022,9 @@ class OxcoApp:
         ) -> List[ow.CompareFileEntry]:
             hits = [e for e in entries if pred(e)]
             rest = [e for e in entries if not pred(e)]
-            return ow.sort_compare_entries(hits, sort_key) + ow.sort_compare_entries(rest, sort_key)
+            return ow.sort_compare_entries(hits, sort_key, pattern_text=pattern) + ow.sort_compare_entries(
+                rest, sort_key, pattern_text=pattern
+            )
 
         ordered = list(self._compare_df_entries)
         if orig_sig:

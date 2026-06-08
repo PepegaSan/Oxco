@@ -839,16 +839,90 @@ def _compare_duration_group_key(entry: CompareFileEntry) -> str:
     return fmt_compare_duration(round(entry.duration_sec, 1))
 
 
-def sort_compare_entries(entries: List[CompareFileEntry], mode: str) -> List[CompareFileEntry]:
+def _compare_date_sort_key(
+    entry: CompareFileEntry, *, desc: bool = False, pattern_text: str = ""
+) -> Tuple[float, str]:
+    t = compare_entry_sort_time(entry, pattern_text)
+    name = entry.path.name.casefold()
+    if desc:
+        return (-t, name)
+    return (t, name)
+
+
+def _compare_pattern_regex(pattern_text: str) -> re.Pattern[str]:
+    pattern_text = (pattern_text or "YYMMDDHHmmSS").strip().replace("{", "").replace("}", "")
+    token_map = {
+        "YYYY": r"(?P<YYYY>\d{4})",
+        "YY": r"(?P<YY>\d{2})",
+        "MM": r"(?P<MM>\d{2})",
+        "DD": r"(?P<DD>\d{2})",
+        "HH": r"(?P<HH>\d{2})",
+        "mm": r"(?P<mm>\d{2})",
+        "SS": r"(?P<SS>\d{2})",
+        "DIGITS": r"(?P<DIGITS>\d+)",
+        "LETTERS": r"(?P<LETTERS>[A-Za-z]+)",
+        "ALNUM": r"(?P<ALNUM>[A-Za-z0-9]+)",
+        "ANY": r"(?P<ANY>.+?)",
+    }
+    token_regex = re.escape(pattern_text)
+    for token in ["YYYY", "YY", "MM", "DD", "HH", "mm", "SS", "DIGITS", "LETTERS", "ALNUM", "ANY"]:
+        token_regex = token_regex.replace(re.escape(token), token_map[token])
+    return re.compile(token_regex)
+
+
+def compare_filename_pattern_timestamp(stem: str, pattern_text: str) -> Optional[float]:
+    """Zeitstempel aus Dateinamen-Muster (z. B. YYMMDDHHmmSS), sonst None."""
+    import datetime as dt
+
+    match = _compare_pattern_regex(pattern_text).search(stem)
+    if not match:
+        return None
+    gd = match.groupdict()
+    try:
+        if gd.get("YYYY"):
+            year = int(gd["YYYY"])
+        elif gd.get("YY"):
+            yy = int(gd["YY"])
+            year = 2000 + yy if yy < 100 else yy
+        else:
+            return None
+        month = int(gd.get("MM") or 1)
+        day = int(gd.get("DD") or 1)
+        hour = int(gd.get("HH") or 0)
+        minute = int(gd.get("mm") or 0)
+        second = int(gd.get("SS") or 0)
+        return dt.datetime(year, month, day, hour, minute, second).timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def compare_entry_sort_time(entry: CompareFileEntry, pattern_text: str = "") -> float:
+    """Sortier-Zeit: Muster im Dateinamen, sonst Datei-mtime."""
+    ts = compare_filename_pattern_timestamp(entry.path.stem, pattern_text)
+    return ts if ts is not None else entry.mtime
+
+
+def _compare_size_sort_key(entry: CompareFileEntry, *, desc: bool = False) -> Tuple[int, str]:
+    name = entry.path.name.casefold()
+    if desc:
+        return (-entry.size, name)
+    return (entry.size, name)
+
+
+def sort_compare_entries(
+    entries: List[CompareFileEntry], mode: str, *, pattern_text: str = ""
+) -> List[CompareFileEntry]:
     mode = (mode or "date_desc").strip().lower()
     if mode == "date_asc":
-        return sorted(entries, key=lambda e: e.mtime)
+        return sorted(entries, key=lambda e: _compare_date_sort_key(e, pattern_text=pattern_text))
     if mode == "date_desc":
-        return sorted(entries, key=lambda e: e.mtime, reverse=True)
+        return sorted(
+            entries, key=lambda e: _compare_date_sort_key(e, desc=True, pattern_text=pattern_text)
+        )
     if mode == "size_asc":
-        return sorted(entries, key=lambda e: e.size)
+        return sorted(entries, key=lambda e: _compare_size_sort_key(e))
     if mode == "size_desc":
-        return sorted(entries, key=lambda e: e.size, reverse=True)
+        return sorted(entries, key=lambda e: _compare_size_sort_key(e, desc=True))
     if mode == "duration_asc":
         return sorted(entries, key=lambda e: _compare_duration_sort_key(e))
     if mode == "duration_desc":
@@ -864,10 +938,37 @@ def _compare_folder_group_key(rel: str) -> str:
     return s if s and s != "." else "."
 
 
-def _compare_date_group_key(mtime: float) -> str:
+def _compare_date_group_key(ts: float) -> str:
     import datetime as _dt
 
-    return _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+def _compare_group_order_key(
+    grp_items: Sequence[CompareFileEntry], sort_mode: str, *, pattern_text: str = ""
+) -> Tuple:
+    if not grp_items:
+        return (0,)
+    sort_mode = (sort_mode or "date_desc").strip().lower()
+    if sort_mode == "date_desc":
+        return (-max(compare_entry_sort_time(e, pattern_text) for e in grp_items),)
+    if sort_mode == "date_asc":
+        return (min(compare_entry_sort_time(e, pattern_text) for e in grp_items),)
+    if sort_mode == "size_desc":
+        return (-max(e.size for e in grp_items),)
+    if sort_mode == "size_asc":
+        return (min(e.size for e in grp_items),)
+    if sort_mode == "duration_desc":
+        missing, dur = _compare_group_duration_stat(grp_items)
+        return (missing, -dur)
+    if sort_mode == "duration_asc":
+        missing, dur = _compare_group_duration_stat(grp_items)
+        return (missing, dur)
+    if sort_mode == "name_desc":
+        return (min(e.path.name.casefold() for e in grp_items),)
+    if sort_mode == "name_asc":
+        return (min(e.path.name.casefold() for e in grp_items),)
+    return (min(e.path.name.casefold() for e in grp_items),)
 
 
 def _compare_letter_group_key(name: str) -> str:
@@ -886,18 +987,24 @@ def _compare_group_duration_stat(items: Sequence[CompareFileEntry]) -> Tuple[int
 
 
 def group_compare_entries(
-    entries: List[CompareFileEntry], group: str, *, sort_mode: str = ""
+    entries: List[CompareFileEntry],
+    group: str,
+    *,
+    sort_mode: str = "",
+    pattern_text: str = "",
 ) -> List[Tuple[str, List[CompareFileEntry]]]:
     group = (group or "none").strip().lower()
-    sort_mode = (sort_mode or "").strip().lower()
+    sort_mode = (sort_mode or "date_desc").strip().lower()
     if group in ("none", ""):
-        return [("", list(entries))]
+        return [
+            ("", sort_compare_entries(list(entries), sort_mode, pattern_text=pattern_text))
+        ]
     buckets: Dict[str, List[CompareFileEntry]] = {}
     for e in entries:
         if group == "folder":
             key = _compare_folder_group_key(e.rel)
         elif group == "date":
-            key = _compare_date_group_key(e.mtime)
+            key = _compare_date_group_key(compare_entry_sort_time(e, pattern_text))
         elif group == "letter":
             key = _compare_letter_group_key(e.path.name)
         elif group == "duration":
@@ -906,29 +1013,14 @@ def group_compare_entries(
             key = ""
         buckets.setdefault(key, []).append(e)
     items_pairs = list(buckets.items())
-    if sort_mode in ("duration_desc", "duration_asc"):
-        desc = sort_mode == "duration_desc"
-
-        def _grp_dur_key(item: Tuple[str, List[CompareFileEntry]]) -> Tuple[int, float, str]:
-            label, grp_items = item
-            missing, dur = _compare_group_duration_stat(grp_items)
-            return (missing, -dur if desc else dur, label.casefold())
-
-        items_pairs = sorted(items_pairs, key=_grp_dur_key)
-        return [(label, sort_compare_entries(grp_items, sort_mode)) for label, grp_items in items_pairs]
-    if group == "duration":
-
-        def _dur_bucket_order(item: Tuple[str, List[CompareFileEntry]]) -> Tuple[int, float, str]:
-            label, grp_items = item
-            if label == "—":
-                return (1, 0.0, label)
-            missing, dur = _compare_group_duration_stat(grp_items)
-            return (missing, dur, label)
-
-        items_pairs = sorted(items_pairs, key=_dur_bucket_order)
-    else:
-        items_pairs = sorted(items_pairs, key=lambda kv: kv[0].casefold())
-    return items_pairs
+    items_pairs = sorted(
+        items_pairs,
+        key=lambda kv: _compare_group_order_key(kv[1], sort_mode, pattern_text=pattern_text),
+    )
+    return [
+        (label, sort_compare_entries(grp_items, sort_mode, pattern_text=pattern_text))
+        for label, grp_items in items_pairs
+    ]
 
 
 # —— Autotagger (Watchdog tagger — Einmal-Lauf, ein Profil) ——
