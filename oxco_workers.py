@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union, Any
 
 import oxco_i18n as oi
 
@@ -683,6 +683,228 @@ def probe_compare_media(path: Path) -> Tuple[Optional[float], Optional[int], Opt
     return duration, width, height
 
 
+@dataclass
+class PreviewVideoMeta:
+    path: Path
+    duration_sec: float
+    fps: float
+    frame_count: int
+    width: int
+    height: int
+
+
+def _parse_ffprobe_fps(raw: object) -> Optional[float]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            n = float(num)
+            d = float(den)
+            if d <= 0:
+                return None
+            return n / d
+        except ValueError:
+            return None
+    try:
+        val = float(text)
+        return val if val > 0 else None
+    except ValueError:
+        return None
+
+
+def probe_preview_media(path: Path) -> Optional[PreviewVideoMeta]:
+    """Metadaten für Vorschau (ffprobe): Dauer, FPS, Auflösung, Frame-Anzahl."""
+    if not shutil.which("ffprobe"):
+        return None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format=duration",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames",
+        "-select_streams",
+        "v:0",
+        str(path),
+    ]
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    duration: Optional[float] = None
+    fmt_dur = (payload.get("format") or {}).get("duration")
+    if fmt_dur is not None:
+        try:
+            duration = float(fmt_dur)
+        except (TypeError, ValueError):
+            duration = None
+    streams = payload.get("streams") or []
+    video_stream = streams[0] if streams else None
+    if not video_stream:
+        return None
+    width = height = None
+    if video_stream.get("width") is not None:
+        try:
+            width = int(video_stream["width"])
+        except (TypeError, ValueError):
+            width = None
+    if video_stream.get("height") is not None:
+        try:
+            height = int(video_stream["height"])
+        except (TypeError, ValueError):
+            height = None
+    if width is None or height is None or width <= 0 or height <= 0:
+        return None
+    fps = _parse_ffprobe_fps(video_stream.get("avg_frame_rate"))
+    if fps is None:
+        fps = _parse_ffprobe_fps(video_stream.get("r_frame_rate"))
+    if fps is None or fps <= 0:
+        fps = 24.0
+    frame_count: Optional[int] = None
+    nb = video_stream.get("nb_frames")
+    if nb is not None:
+        try:
+            frame_count = int(nb)
+        except (TypeError, ValueError):
+            frame_count = None
+    if frame_count is None or frame_count <= 0:
+        if duration is not None and duration > 0:
+            frame_count = max(1, int(round(duration * fps)))
+        else:
+            return None
+    if duration is None or duration <= 0:
+        duration = frame_count / fps
+    return PreviewVideoMeta(
+        path=path,
+        duration_sec=float(duration),
+        fps=float(fps),
+        frame_count=int(frame_count),
+        width=int(width),
+        height=int(height),
+    )
+
+
+def ffmpeg_extract_preview_frame_bgr(
+    path: Path,
+    meta: PreviewVideoMeta,
+    frame_index: int,
+    *,
+    max_width: Optional[int] = None,
+) -> Any:
+    """Einzelbild per ffmpeg (-ss vor -i = schnelles Springen in großen MP4s)."""
+    import cv2
+    import numpy as _np
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or meta.fps <= 0:
+        return None
+    last = max(0, meta.frame_count - 1)
+    idx = max(0, min(int(frame_index), last))
+    time_sec = min(max(0.0, idx / meta.fps), max(0.0, meta.duration_sec - 0.001))
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{time_sec:.3f}",
+        "-i",
+        str(path),
+        "-an",
+        "-sn",
+        "-dn",
+        "-frames:v",
+        "1",
+    ]
+    if max_width and meta.width > max_width:
+        cmd.extend(["-vf", f"scale={int(max_width)}:-2"])
+    cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"])
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+    buf = _np.frombuffer(completed.stdout, dtype=_np.uint8)
+    frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if frame is None:
+        return None
+    return frame
+
+
+def opencv_read_frame_bgr(path: Path, frame_index: int, cap: Any = None) -> Any:
+    """Fallback: OpenCV-Seek (langsam bei großen Dateien)."""
+    import cv2
+
+    own = cap is None
+    local_cap = cap
+    if local_cap is None:
+        local_cap = cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
+    try:
+        if not local_cap.isOpened():
+            return None
+        local_cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+        ok, frame = local_cap.read()
+        if not ok or frame is None:
+            return None
+        if frame.ndim == 2:
+            return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        if frame.shape[2] == 4:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return frame
+    finally:
+        if own and local_cap is not None:
+            local_cap.release()
+
+
+def read_preview_frame_bgr(
+    path: Path,
+    meta: Optional[PreviewVideoMeta],
+    frame_index: int,
+    *,
+    cap: Any = None,
+    sequential: bool = False,
+    max_width: Optional[int] = None,
+) -> Any:
+    if sequential and cap is not None:
+        try:
+            if cap.isOpened():
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    if frame.ndim == 2:
+                        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    if frame.shape[2] == 4:
+                        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    return frame
+        except cv2.error:
+            pass
+    if meta is not None and shutil.which("ffmpeg"):
+        frame = ffmpeg_extract_preview_frame_bgr(path, meta, frame_index, max_width=max_width)
+        if frame is not None:
+            return frame
+    return opencv_read_frame_bgr(path, frame_index, cap=None)
+
+
 def enrich_compare_entry_probe(entry: CompareFileEntry) -> None:
     duration, width, height = probe_compare_media(entry.path)
     if duration is None or width is None or height is None:
@@ -1065,6 +1287,13 @@ def parse_drop_suffix_entries(raw_text: str) -> List[DropStripEntry]:
     return out
 
 
+COMPARE_EXPORT_BLOCK_RE = re.compile(
+    r"_b[\d][\w.-]*_n\d+_p\d+(?:_m\d+)?",
+    re.IGNORECASE,
+)
+DAVINCI_EXPORT_BLOCK_RE = re.compile(r"_davinci_export", re.IGNORECASE)
+
+
 def compare_export_tag_suffix(
     buffer_seconds: float,
     noise_thresh: int,
@@ -1078,6 +1307,31 @@ def compare_export_tag_suffix(
     if mx > 0:
         s += f"_m{mx}"
     return s.lower()
+
+
+def strip_pipeline_suffixes_anywhere(
+    stem: str,
+    *,
+    bitrate_output_suffix: str = "_bitrate",
+) -> str:
+    """Compare-/DaVinci-/Bitrate-Marker überall im Namen entfernen (nicht nur am Ende).
+
+    Wichtig wenn z. B. das Datums-Muster *nach* dem Compare-Suffix steht oder sich
+    die Filter-Schwellen (n15 vs. n19) geändert haben.
+    """
+    current = COMPARE_EXPORT_BLOCK_RE.sub("", stem)
+    current = DAVINCI_EXPORT_BLOCK_RE.sub("", current)
+    sfx = (bitrate_output_suffix or "_bitrate").strip()
+    if not sfx.startswith("_"):
+        sfx = f"_{sfx}"
+    if sfx:
+        sfx_re = re.compile(re.escape(sfx) + r"(?=_|$)", re.IGNORECASE)
+        current = sfx_re.sub("", current)
+    while "__" in current:
+        current = current.replace("__", "_")
+    while "--" in current:
+        current = current.replace("--", "-")
+    return current.strip("_- ")
 
 
 def build_automatic_tagger_drop_entries(
@@ -1096,7 +1350,7 @@ def build_automatic_tagger_drop_entries(
     )
     entries.append(re.compile(r"_davinci_export\Z", re.IGNORECASE))
     # Andere Compare-Läufe (andere Schwellen) am Namensende
-    entries.append(re.compile(r"_b[\d][\w.-]*_n\d+_p\d+(?:_m\d+)?\Z", re.IGNORECASE))
+    entries.append(re.compile(COMPARE_EXPORT_BLOCK_RE.pattern + r"\Z", re.IGNORECASE))
     sfx = (bitrate_output_suffix or "_bitrate").strip()
     if not sfx.startswith("_"):
         sfx = f"_{sfx}"
@@ -1319,17 +1573,22 @@ def build_tagger_target_name(
     pattern_text: str,
     *,
     auto_drop_entries: Optional[Sequence[DropStripEntry]] = None,
+    bitrate_output_suffix: str = "_bitrate",
 ) -> str:
-    found = extract_pattern_match(stem, pattern_text)
+    kept_suffix = pick_suffix_to_keep(stem, keep_csv, drop_csv)
+    work = strip_pipeline_suffixes_anywhere(stem, bitrate_output_suffix=bitrate_output_suffix)
+    work = remove_trailing_suffixes(
+        work, keep_csv, drop_csv, extra_drop_entries=auto_drop_entries
+    )
+    found = extract_pattern_match(work, pattern_text) or extract_pattern_match(stem, pattern_text)
     if not found:
         raise ValueError("Muster nicht im Dateinamen")
-    kept_suffix = pick_suffix_to_keep(stem, keep_csv, drop_csv)
     tag_text = tag.strip()
     # Tag soll das Muster (z. B. YYMMDDHHmmSS) *ersetzen*, nicht ans Ende des restlichen Namens.
     if tag_text:
-        base_name = stem.replace(found, tag_text, 1)
+        base_name = work.replace(found, tag_text, 1)
     else:
-        base_name = remove_date_token(stem, pattern_text)
+        base_name = remove_date_token(work, pattern_text)
     base_name = remove_trailing_suffixes(
         base_name, keep_csv, drop_csv, extra_drop_entries=auto_drop_entries
     )
@@ -1412,6 +1671,7 @@ def tagger_process_folder(
                 drop_suffix_csv,
                 pattern_text,
                 auto_drop_entries=auto_drop,
+                bitrate_output_suffix=bitrate_output_suffix,
             )
             target = output_dir / new_name
             target = make_unique_path(target)

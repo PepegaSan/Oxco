@@ -223,6 +223,10 @@ DE: Dict[str, str] = {
     "log.br_done": "— Bitrate fertig —",
     "log.br_src_deleted": "Quelle gelöscht: {name}",
     "log.br_src_delete_fail": "Quelle konnte nicht gelöscht werden: {name} ({err})",
+    "log.icon_missing": (
+        "Hinweis: Taskleisten-Icon nicht geladen. Oxco.cmd oder Desktop-Verknüpfung nutzen "
+        "(create_oxco_shortcut.ps1), oder dist\\Oxco\\Oxco.exe bauen."
+    ),
     "log.tagger_start": "— Autotagger gestartet —",
     "log.tagger_done": "— Autotagger fertig: {ok} verschoben, {sk} übersprungen —",
     "log.tagger_list": "Autotagger-Liste: {n} .mp4 im Quellordner.",
@@ -278,7 +282,8 @@ DE: Dict[str, str] = {
         "• Compare-Schwellen-Suffix aus Tab „Filter“ (_b…_n…_p…, optional _m…)\n"
         "• _DaVinci_Export\n"
         "• das Bitrate-Ausgabe-Suffix aus Tab „Filter“ (z. B. _bitrate)\n"
-        "• andere _b/_n/_p-Kombinationen am Ende (ältere Compare-Läufe)\n\n"
+        "• andere _b/_n/_p-Kombinationen (auch ältere Schwellen wie n15, wenn du jetzt n19 nutzt)\n"
+        "  — überall im Namen, nicht nur am Ende\n\n"
         "Regex: Eintrag mit r: am Anfang; nur am Namensende. Beispiel Auflösungen: r:_\\d{3,4}p"
     ),
     "help.pattern.title": "Muster im Dateinamen",
@@ -577,6 +582,10 @@ EN.update(
         "log.br_done": "— Bitrate finished —",
         "log.br_src_deleted": "Source deleted: {name}",
         "log.br_src_delete_fail": "Could not delete source: {name} ({err})",
+        "log.icon_missing": (
+            "Note: taskbar icon not loaded. Use Oxco.cmd or a desktop shortcut "
+            "(create_oxco_shortcut.ps1), or build dist\\Oxco\\Oxco.exe."
+        ),
         "log.tagger_start": "— Autotagger started —",
         "log.tagger_done": "— Autotagger finished: {ok} moved, {sk} skipped —",
         "log.tagger_list": "Autotagger list: {n} .mp4 in the source folder.",
@@ -629,7 +638,8 @@ EN.update(
             "• Compare threshold suffix from the Filter tab (_b…_n…_p…, optional _m…)\n"
             "• _DaVinci_Export\n"
             "• the bitrate output suffix from the Filter tab (e.g. _bitrate)\n"
-            "• other _b/_n/_p combinations at the end (older Compare runs)\n\n"
+            "• other _b/_n/_p combinations (older thresholds like n15 when you now use n19)\n"
+            "  — anywhere in the name, not only at the end\n\n"
             "Regex: prefix r: ; end of stem only. Example resolutions: r:_\\d{3,4}p"
         ),
         "help.pattern.title": "Filename pattern",

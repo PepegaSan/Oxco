@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 import compare as oxco_compare
+import oxco_workers as ow
 
 
 def _to_bgr(frame: Any) -> Optional[np.ndarray]:
@@ -60,11 +61,15 @@ def _apply_diff_overlay(
 class OxcoVideoPreview(ttk.Frame):
     """Vorschau + Compare-Filter-Hilfe."""
 
+    _SCRUB_DEBOUNCE_MS = 120
+
     def __init__(self, parent: tk.Misc, host_app: Optional[Any] = None, **kwargs: Any) -> None:
         super().__init__(parent, **kwargs)
         self._host_app = host_app
         self._cap_a: Any = None
         self._cap_b: Any = None
+        self._meta_a: Optional[ow.PreviewVideoMeta] = None
+        self._meta_b: Optional[ow.PreviewVideoMeta] = None
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._playing = False
         self._frame_index = 0
@@ -74,6 +79,7 @@ class OxcoVideoPreview(ttk.Frame):
         self._last_tick = 0.0
         self._seq_next: Optional[int] = None
         self._updating_scale = False
+        self._scrub_after: Optional[str] = None
         self._trace_ids: list[tuple[Any, str, str]] = []
         self._auto_load_after: Optional[str] = None
         self._syncing_paths_from_host = False
@@ -465,16 +471,43 @@ class OxcoVideoPreview(ttk.Frame):
             self.var_path_b.set(p)
 
     def _release_caps(self) -> None:
+        if self._scrub_after is not None:
+            try:
+                self.after_cancel(self._scrub_after)
+            except tk.TclError:
+                pass
+            self._scrub_after = None
         if self._cap_a is not None:
             self._cap_a.release()
             self._cap_a = None
         if self._cap_b is not None:
             self._cap_b.release()
             self._cap_b = None
+        self._meta_a = None
+        self._meta_b = None
+
+    def _cancel_scrub_render(self) -> None:
+        if self._scrub_after is not None:
+            try:
+                self.after_cancel(self._scrub_after)
+            except tk.TclError:
+                pass
+            self._scrub_after = None
+
+    def _schedule_scrub_render(self) -> None:
+        self._cancel_scrub_render()
+        self._scrub_after = self.after(self._SCRUB_DEBOUNCE_MS, self._scrub_render)
+
+    def _scrub_render(self) -> None:
+        self._scrub_after = None
+        self._render_frame()
+
+    def _preview_ready(self) -> bool:
+        return self._meta_a is not None or self._cap_a is not None
 
     def _on_side_toggle(self) -> None:
         self._seq_next = None
-        if self._cap_a is not None:
+        if self._preview_ready():
             self._render_frame()
 
     def _load(self) -> None:
@@ -496,30 +529,44 @@ class OxcoVideoPreview(ttk.Frame):
                     messagebox.showwarning(self._t("preview.warn_no_a_title"), self._t("preview.warn_no_b"))
                 return
 
-        if not Path(pa).is_file():
+        path_a = Path(pa)
+        if not path_a.is_file():
             if not silent:
                 messagebox.showerror(self._t("preview.warn_no_a_title"), self._t("preview.err_not_found"))
             return
 
-        self._cap_a = cv2.VideoCapture(pa)
+        self._meta_a = ow.probe_preview_media(path_a)
+        self._cap_a = cv2.VideoCapture(str(path_a), cv2.CAP_FFMPEG)
         if not self._cap_a.isOpened():
-            self._release_caps()
-            if not silent:
-                messagebox.showerror(self._t("preview.warn_no_a_title"), self._t("preview.err_open_a"))
-            return
+            self._cap_a.release()
+            self._cap_a = None
+            if self._meta_a is None:
+                if not silent:
+                    messagebox.showerror(self._t("preview.warn_no_a_title"), self._t("preview.err_open_a"))
+                return
 
-        self._total = int(self._cap_a.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        self._vw = int(self._cap_a.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-        self._vh = int(self._cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+        if self._meta_a is not None:
+            self._total = self._meta_a.frame_count
+            self._vw = self._meta_a.width
+            self._vh = self._meta_a.height
+        elif self._cap_a is not None:
+            self._total = int(self._cap_a.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+            self._vw = int(self._cap_a.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+            self._vh = int(self._cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+        else:
+            self._total = 0
 
         self._cap_b = None
+        self._meta_b = None
         pb = self.var_path_b.get().strip()
         if pb and Path(pb).is_file():
-            self._cap_b = cv2.VideoCapture(pb)
+            path_b = Path(pb)
+            self._meta_b = ow.probe_preview_media(path_b)
+            self._cap_b = cv2.VideoCapture(str(path_b), cv2.CAP_FFMPEG)
             if not self._cap_b.isOpened():
                 self._cap_b.release()
                 self._cap_b = None
-                if not silent:
+                if self._meta_b is None and not silent:
                     messagebox.showwarning(self._t("preview.warn_no_a_title"), self._t("preview.warn_b_open"))
 
         self._frame_index = 0
@@ -532,10 +579,10 @@ class OxcoVideoPreview(ttk.Frame):
         finally:
             self._updating_scale = False
 
-        self.btn_play.configure(state="normal")
+        self.btn_play.configure(state="normal" if self._cap_a is not None else "disabled")
         self._render_frame()
         self.lbl_info.configure(
-            text=self._t("preview.meta", name=Path(pa).name, frames=self._total, w=self._vw, h=self._vh)
+            text=self._t("preview.meta", name=path_a.name, frames=self._total, w=self._vw, h=self._vh)
         )
 
     def _toggle_play(self) -> None:
@@ -573,7 +620,7 @@ class OxcoVideoPreview(ttk.Frame):
         self.after(1, self._tick)
 
     def _step(self, delta: int) -> None:
-        if self._cap_a is None or self._total <= 0:
+        if not self._preview_ready() or self._total <= 0:
             return
         self._seq_next = None
         self._frame_index = max(0, min(self._total - 1, self._frame_index + delta))
@@ -583,20 +630,29 @@ class OxcoVideoPreview(ttk.Frame):
         finally:
             self._updating_scale = False
         if not self._playing:
-            self._render_frame()
+            self._schedule_scrub_render()
 
     def _on_scale(self, val: str) -> None:
-        if self._updating_scale or self._cap_a is None:
+        if self._updating_scale or not self._preview_ready():
             return
         self._seq_next = None
         self._frame_index = int(float(val))
         if not self._playing:
-            self._render_frame()
+            self._schedule_scrub_render()
 
     def _read_frame_pair(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        if self._cap_a is None:
+        if not self._preview_ready():
             return None, None
-        use_seq = self._seq_next is not None and self._frame_index == self._seq_next
+        pa = self.var_path_a.get().strip()
+        if not pa:
+            return None, None
+        path_a = Path(pa)
+        use_seq = (
+            self._playing
+            and self._cap_a is not None
+            and self._seq_next is not None
+            and self._frame_index == self._seq_next
+        )
         if use_seq:
             ra, fa = self._cap_a.read()
             fb = None
@@ -607,16 +663,12 @@ class OxcoVideoPreview(ttk.Frame):
             if not ra:
                 return None, None
             return fa, fb
-        self._cap_a.set(cv2.CAP_PROP_POS_FRAMES, self._frame_index)
-        ra, fa = self._cap_a.read()
-        if not ra:
-            return None, None
+
+        fa = ow.read_preview_frame_bgr(path_a, self._meta_a, self._frame_index)
         fb = None
-        if self._cap_b is not None:
-            self._cap_b.set(cv2.CAP_PROP_POS_FRAMES, self._frame_index)
-            rb, fb = self._cap_b.read()
-            if not rb:
-                fb = None
+        pb = self.var_path_b.get().strip()
+        if pb and Path(pb).is_file():
+            fb = ow.read_preview_frame_bgr(Path(pb), self._meta_b, self._frame_index)
         return fa, fb
 
     def _update_diff_labels(self, fa: np.ndarray, fb: Optional[np.ndarray]) -> None:
@@ -646,7 +698,7 @@ class OxcoVideoPreview(ttk.Frame):
             )
 
     def _render_frame(self) -> None:
-        if self._cap_a is None:
+        if not self._preview_ready():
             return
         fa, fb = self._read_frame_pair()
         if fa is None:
@@ -767,17 +819,21 @@ class OxcoTaggerPreview(ttk.Frame):
 
     CANVAS_W = 320
     CANVAS_H = 180
+    _SCRUB_DEBOUNCE_MS = 120
+    _SCRUB_MAX_WIDTH = 640
 
     def __init__(self, parent: tk.Misc, host_app: Optional[Any] = None, **kwargs: Any) -> None:
         super().__init__(parent, **kwargs)
         self._host = host_app
         self._cap: Any = None
+        self._meta: Optional[ow.PreviewVideoMeta] = None
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._path: Optional[Path] = None
         self._frame_index = 0
         self._total = 0
         self._playing = False
         self._updating_scale = False
+        self._scrub_after: Optional[str] = None
         self._last_tick = 0.0
 
         self.columnconfigure(0, weight=1)
@@ -839,9 +895,11 @@ class OxcoTaggerPreview(ttk.Frame):
 
         self._path = path
         self.lbl_name.configure(text=path.name)
-        self._total = self._probe_frame_count(path)
+        self._meta = ow.probe_preview_media(path)
+        self._total = self._meta.frame_count if self._meta is not None else self._probe_frame_count(path)
         if self._total <= 0:
             self._path = None
+            self._meta = None
             self._show_placeholder(self._t("preview.err_open_a"))
             return
 
@@ -861,6 +919,7 @@ class OxcoTaggerPreview(ttk.Frame):
         self._stop_playback()
         self._release_cap()
         self._path = None
+        self._meta = None
         self.scale.configure(state="disabled")
         self.btn_play.configure(state="disabled", text=self._t("preview.play"))
 
@@ -884,11 +943,29 @@ class OxcoTaggerPreview(ttk.Frame):
 
     def shutdown(self) -> None:
         self._stop_playback()
+        self._cancel_scrub_render()
         self._release_cap()
         self._path = None
+        self._meta = None
 
     def _stop_playback(self) -> None:
         self._playing = False
+
+    def _cancel_scrub_render(self) -> None:
+        if self._scrub_after is not None:
+            try:
+                self.after_cancel(self._scrub_after)
+            except tk.TclError:
+                pass
+            self._scrub_after = None
+
+    def _schedule_scrub_render(self) -> None:
+        self._cancel_scrub_render()
+        self._scrub_after = self.after(self._SCRUB_DEBOUNCE_MS, self._scrub_render)
+
+    def _scrub_render(self) -> None:
+        self._scrub_after = None
+        self._render_frame()
 
     def _release_cap(self) -> None:
         if self._cap is not None:
@@ -896,7 +973,7 @@ class OxcoTaggerPreview(ttk.Frame):
             self._cap = None
 
     def _probe_frame_count(self, path: Path) -> int:
-        cap = cv2.VideoCapture(str(path))
+        cap = cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
         try:
             if not cap.isOpened():
                 return 0
@@ -905,17 +982,12 @@ class OxcoTaggerPreview(ttk.Frame):
             cap.release()
 
     def _read_frame_bgr(self, path: Path, frame_index: int) -> Optional[np.ndarray]:
-        cap = cv2.VideoCapture(str(path))
-        try:
-            if not cap.isOpened():
-                return None
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                return None
-            return _to_bgr(frame)
-        finally:
-            cap.release()
+        return ow.read_preview_frame_bgr(
+            path,
+            self._meta,
+            frame_index,
+            max_width=self._SCRUB_MAX_WIDTH,
+        )
 
     def _show_placeholder(self, msg: Optional[str] = None) -> None:
         self._release_cap()
@@ -937,7 +1009,7 @@ class OxcoTaggerPreview(ttk.Frame):
         self.btn_play.configure(text=self._t("preview.pause") if self._playing else self._t("preview.play"))
         if self._playing:
             self._release_cap()
-            self._cap = cv2.VideoCapture(str(self._path))
+            self._cap = cv2.VideoCapture(str(self._path), cv2.CAP_FFMPEG)
             if not self._cap.isOpened():
                 self._release_cap()
                 self._playing = False
@@ -992,7 +1064,7 @@ class OxcoTaggerPreview(ttk.Frame):
         if self._playing and self._cap is not None:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, self._frame_index)
             return
-        self._render_frame()
+        self._schedule_scrub_render()
 
     def _paint_frame(self, bgr: np.ndarray) -> None:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)

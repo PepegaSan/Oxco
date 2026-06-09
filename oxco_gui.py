@@ -20,6 +20,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 import oxco_workers as ow
 import oxco_i18n as oi
+from oxco_winicon import apply_windows_window_icon, prepare_windows_taskbar_icon
+from PIL import Image, ImageTk
+
 from oxco_player import OxcoTaggerPreview, OxcoVideoPreview
 
 CONFIG_NAME = "oxco_config.json"
@@ -33,6 +36,20 @@ def app_dir() -> Path:
 
 def config_path() -> Path:
     return app_dir() / CONFIG_NAME
+
+
+def asset_path(name: str) -> Path:
+    if getattr(sys, "frozen", False):
+        roots = [Path(getattr(sys, "_MEIPASS", "")), app_dir()]
+    else:
+        roots = [app_dir()]
+    for root in roots:
+        if not root:
+            continue
+        candidate = root / "assets" / name
+        if candidate.is_file():
+            return candidate
+    return app_dir() / "assets" / name
 
 
 def default_davinci_api_path() -> str:
@@ -148,6 +165,8 @@ class OxcoApp:
         self._tag_route_row_vars: List[tuple[tk.StringVar, tk.StringVar]] = []
         self._tag_route_busy = False
         self._file_op_in_progress = False
+        self._logo_photo: Optional[ImageTk.PhotoImage] = None
+        self._icon_photo: Optional[ImageTk.PhotoImage] = None
 
         # —— Variablen: Pfade ——
         # Compare-Export → Bitrate-Scan (wenn gekoppelt, siehe trace).
@@ -251,6 +270,8 @@ class OxcoApp:
         self._build_ui()
         self._apply_window_title()
         self.root.minsize(720, 560)
+        self.root.update_idletasks()
+        self._apply_window_icon()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind("<Configure>", self._on_configure)
 
@@ -381,6 +402,23 @@ class OxcoApp:
 
     def _apply_window_title(self) -> None:
         self.root.title(self.tr("app.title"))
+
+    def _apply_window_icon(self) -> None:
+        ok = apply_windows_window_icon(self.root, asset_path)
+        if not ok and sys.platform == "win32":
+            self._log(self.tr("log.icon_missing"))
+
+        icon_png = asset_path("oxco_icon.png")
+        if not icon_png.is_file():
+            return
+        try:
+            img = Image.open(icon_png)
+            thumb = img.copy()
+            thumb.thumbnail((48, 48), Image.Resampling.LANCZOS)
+            self._icon_photo = ImageTk.PhotoImage(thumb)
+            self.root.iconphoto(True, self._icon_photo)
+        except OSError:
+            pass
 
     def _apply_ui_i18n(self) -> None:
         self._apply_window_title()
@@ -676,9 +714,20 @@ class OxcoApp:
 
         topbar = ttk.Frame(self.root)
         topbar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 0))
-        topbar.columnconfigure(0, weight=1)
+        topbar.columnconfigure(1, weight=1)
+
+        brand = ttk.Frame(topbar)
+        brand.grid(row=0, column=0, sticky="w")
+        self._logo_label = ttk.Label(brand)
+        self._logo_label.pack(side="left", padx=(0, 8))
+        self._brand_title = ttk.Label(brand, text="Oxco", font=("Segoe UI", 15, "bold"))
+        self._brand_title.pack(side="left")
+        self._brand_sub = ttk.Label(brand, text="Compare · Bitrate · Tag", foreground="#5a6a7a")
+        self._brand_sub.pack(side="left", padx=(10, 0))
+        self._apply_header_logo()
+
         self._btn_settings = ttk.Button(topbar, text="⚙", width=3, command=self._open_settings)
-        self._btn_settings.grid(row=0, column=1, sticky="e")
+        self._btn_settings.grid(row=0, column=2, sticky="e")
 
         nb = ttk.Notebook(self.root)
         nb.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 4))
@@ -714,6 +763,18 @@ class OxcoApp:
         sb = ttk.Scrollbar(log_fr, orient="vertical", command=self.log.yview)
         sb.grid(row=0, column=1, sticky="ns", pady=6)
         self.log.configure(yscrollcommand=sb.set)
+
+    def _apply_header_logo(self) -> None:
+        icon_png = asset_path("oxco_icon.png")
+        if not icon_png.is_file():
+            return
+        try:
+            img = Image.open(icon_png)
+            img.thumbnail((40, 40), Image.Resampling.LANCZOS)
+            self._logo_photo = ImageTk.PhotoImage(img)
+            self._logo_label.configure(image=self._logo_photo)
+        except OSError:
+            pass
 
     def _build_tab_paths(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -2777,5 +2838,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    prepare_windows_taskbar_icon()
     _run_compare_cli_child_and_exit()
     main()
